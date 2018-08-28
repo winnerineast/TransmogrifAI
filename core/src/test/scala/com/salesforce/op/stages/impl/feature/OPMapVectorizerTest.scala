@@ -390,19 +390,25 @@ object OPMapVectorizerTestHelper extends Matchers {
 
     // val baseIndicesToCompare: Array[Int] = baseColMetaArray.filterNot(_.isNullIndicator).map(_.index).sorted
     val baseIndicesToCompare: Array[Int] = baseColMetaArray
-      .map(f => (f.parentFeatureName.head, f.indicatorValue, f.grouping) match {
-        case (pfName, Some(iv), Some(ig)) => (pfName + ig + iv, f.index)
-        case (pfName, Some(iv), None) => (pfName + iv, f.index)
-        case (pfName, None, Some(ig)) => (pfName + ig, f.index)
-        case (pfName, None, None) => (pfName, f.index)
+      .map(f => (f.parentFeatureName.head, f.indicatorValue, f.descriptorValue, f.grouping) match {
+        case (pfName, Some(iv), None, Some(ig)) => (pfName + ig + iv, f.index)
+        case (pfName, Some(iv), None, None) => (pfName + iv, f.index)
+        case (pfName, None, None, Some(ig)) => (pfName + ig, f.index)
+        case (pfName, None, None, None) => (pfName, f.index)
+        case (pfName, None, Some(dv), Some(ig)) => (pfName + ig + dv, f.index)
+        case (pfName, None, Some(dv), None) => (pfName + dv, f.index)
+        case (_, Some(_), Some(_), _) => throw new RuntimeException("this metadata config should not exist")
       }).sortBy(_._1).map(_._2)
     // Also need to sort map vectorized indices by feature name since they can come out in arbitrary orders
     val mapIndicesToCompare: Array[Int] = mapColMetaArray
-      .map(f => (f.parentFeatureName.head, f.indicatorValue, f.grouping) match {
-        case (pfName, Some(iv), Some(ig)) => (pfName + ig + iv, f.index)
-        case (pfName, Some(iv), None) => (pfName + iv, f.index)
-        case (pfName, None, Some(ig)) => (pfName + ig, f.index)
-        case (pfName, None, None) => (pfName, f.index)
+      .map(f => (f.parentFeatureName.head, f.indicatorValue, f.descriptorValue, f.grouping) match {
+        case (pfName, Some(iv), None, Some(ig)) => (pfName + ig + iv, f.index)
+        case (pfName, Some(iv), None, None) => (pfName + iv, f.index)
+        case (pfName, None, None, Some(ig)) => (pfName + ig, f.index)
+        case (pfName, None, None, None) => (pfName, f.index)
+        case (pfName, None, Some(dv), Some(ig)) => (pfName + ig + dv, f.index)
+        case (pfName, None, Some(dv), None) => (pfName + dv, f.index)
+        case (_, Some(_), Some(_), _) => throw new RuntimeException("this metadata config should not exist")
       }).sortBy(_._1).map(_._2)
     log.info("base indices to compare: {}", baseIndicesToCompare.toList)
     log.info("map indices to compare: {}", mapIndicesToCompare.toList)
