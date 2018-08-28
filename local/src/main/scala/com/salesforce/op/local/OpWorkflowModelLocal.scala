@@ -30,16 +30,32 @@
 
 package com.salesforce.op.local
 
+import java.nio.file.Paths
+
+import com.github.marschall.memoryfilesystem.MemoryFileSystemBuilder
 import com.ibm.aardpfark.spark.ml.SparkSupport
 import com.opendatagroup.hadrian.jvmcompiler.PFAEngine
 import com.salesforce.op.OpWorkflowModel
 import com.salesforce.op.stages.sparkwrappers.generic.SparkWrapperParams
 import com.salesforce.op.stages.{OPStage, OpTransformer}
 import com.salesforce.op.utils.json.JsonUtils
+import ml.combust.bundle.dsl.Bundle
+import ml.combust.bundle.serializer.{BundleSerializer, SerializationFormat}
 import org.apache.spark.ml.SparkMLSharedParamConstants._
 import org.apache.spark.ml.Transformer
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.ml.param.ParamMap
+import ml.combust.bundle.{BundleContext, BundleFile, BundleRegistry, BundleWriter}
+import ml.combust.mleap.runtime.MleapContext
+import ml.combust.mleap.spark.SparkSupport._
+import ml.combust.bundle.serializer.SerializationFormat
+import ml.combust.mleap.runtime.frame.DefaultLeapFrame
+import org.apache.spark.ml.feature.{StringIndexerModel, VectorAssembler}
+import org.apache.spark.ml.mleap.SparkUtil
+import ml.combust.mleap.spark.SparkSupport._
+import org.apache.spark.ml.bundle.SparkBundleContext
+import org.apache.spark.ml.bundle.ops.feature.StringIndexerOpV22
+import resource._
 
 import scala.collection.mutable
 
@@ -63,6 +79,49 @@ trait OpWorkflowModelLocal {
      * @param engine PFA engine
      */
     case class PFAModel(inputs: Map[String, String], output: (String, String), engine: PFAEngine[AnyRef, AnyRef])
+
+    def scoreFunctionMleap: ScoreFunction = {
+      val resultFeatures = model.getResultFeatures().map(_.name).toSet
+      val stagesWithIndex = model.stages.zipWithIndex
+      val opStages = stagesWithIndex.collect { case (s: OpTransformer, i) => s -> i }
+      val sparkStages = stagesWithIndex.filterNot(_._1.isInstanceOf[OpTransformer]).collect {
+        case (s: OPStage with SparkWrapperParams[_], i) if s.getSparkMlStage().isDefined =>
+          ((s, s.getSparkMlStage().get.asInstanceOf[Transformer].copy(ParamMap.empty)), i)
+      }
+
+      val registry = BundleRegistry("ml.combust.mleap.spark.registry.v22") // v22 is for Spark 2.2.x
+      val cxt = SparkBundleContext(None, registry)
+      // val mleapContext = MleapContext(registry)
+      // val registry = mleapContext.bundleRegistry
+
+      val fs = MemoryFileSystemBuilder.newEmpty().build()
+      val mleapStages = for {
+        ((s, sparkStage), i) <- sparkStages
+        // model = registry.modelForObj(sparkStage)
+      } {
+        val bundleFile = BundleFile(fs, Paths.get(""))
+
+        val res = BundleWriter(sparkStage, format = SerializationFormat.Json).save(bundleFile)(cxt).get
+        val bundle = sparkStage.writeBundle.save(bundleFile)(cxt).get
+
+
+        val operation = registry.opForObj[Any, Any, Any](sparkStage)
+        println(operation.model(sparkStage).isInstanceOf[Transformer])
+        println(operation.model(sparkStage).isInstanceOf[Transformer])
+
+        println(operation.model(sparkStage))
+
+        val df = DefaultLeapFrame(null, null)
+        operation.model(null)
+        // new StringIndexerOpV22().model(null).transform(df)
+        // sparkStage.transform(df)
+
+        Bundle(name = s.uid, format = SerializationFormat.Json, root = sparkStage)
+      }
+
+      null
+
+    }
 
     /**
      * Prepares a score function for local scoring

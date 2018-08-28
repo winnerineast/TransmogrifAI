@@ -7,6 +7,13 @@ dependencies {
     compile project(':core')
     testCompile project(':testkit')
 
+    // MLeap serialization for Spark models
+    compile "ml.combust.mleap:mleap-runtime_$scalaVersion:0.10.3"
+    compile "ml.combust.mleap:mleap-spark_$scalaVersion:0.10.3"
+
+    // In-memory file system
+    compile 'com.github.marschall:memoryfilesystem:1.2.2'
+
     // PFA serialization for Spark models
     // TODO: replace with official Aardpfark release when ready
     compile "com.github.relateiq:aardpfark:$aardpfarkVersion"
