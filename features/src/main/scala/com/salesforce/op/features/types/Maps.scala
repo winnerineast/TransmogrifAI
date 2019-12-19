@@ -317,7 +317,10 @@ class Prediction private[op](value: Map[String, Double]) extends RealMap(value) 
     s"value map must only contain valid keys: '$PredictionName' or " +
       s"starting with '$RawPredictionName' or '$ProbabilityName'"
   )
-  private def keysStartsWith(name: String): Array[String] = value.keys.filter(_.startsWith(name)).toArray.sorted
+
+  // Need to make sure we sort the keys by their final index, which comes after an underscore in the apply function
+  private def keysStartsWith(name: String): Array[String] = value.keys.filter(_.startsWith(name)).toArray
+    .sortBy(_.split('_').last.toInt)
 
   /**
    * Prediction value
@@ -343,6 +346,13 @@ class Prediction private[op](value: Map[String, Double]) extends RealMap(value) 
     val probKeys = keysStartsWith(ProbabilityName)
     if (probKeys.nonEmpty) probKeys.map(value) else Array(value(PredictionName))
   }
+
+  override def toString: String = {
+    val rawPred = rawPrediction.mkString("Array(", ", ", ")")
+    val prob = probability.mkString("Array(", ", ", ")")
+    s"${getClass.getSimpleName}(prediction = $prediction, rawPrediction = $rawPred, probability = $prob)"
+  }
+
 }
 object Prediction {
   object Keys {

@@ -42,7 +42,7 @@ import com.salesforce.op.stages.impl.tuning._
 import com.salesforce.op.test.TestSparkContext
 import com.salesforce.op.utils.spark.RichDataset._
 import com.salesforce.op.utils.spark.RichMetadata._
-
+import ml.dmlc.xgboost4j.scala.spark.OpXGBoostQuietLogging
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.ml.param.ParamPair
 import org.apache.spark.ml.tuning.ParamGridBuilder
@@ -56,7 +56,8 @@ import org.scalatest.junit.JUnitRunner
 import org.slf4j.LoggerFactory
 
 @RunWith(classOf[JUnitRunner])
-class BinaryClassificationModelSelectorTest extends FlatSpec with TestSparkContext with CompareParamGrid {
+class BinaryClassificationModelSelectorTest extends FlatSpec with TestSparkContext
+  with CompareParamGrid with OpXGBoostQuietLogging {
 
   val log = LoggerFactory.getLogger(this.getClass)
 
@@ -66,12 +67,12 @@ class BinaryClassificationModelSelectorTest extends FlatSpec with TestSparkConte
 
   // Generate positive observations following a distribution ~ N((0.0, 0.0, 0.0), I_3)
   val positiveData =
-    normalVectorRDD(spark.sparkContext, bigCount, 3, seed = seed)
+    normalVectorRDD(sc, bigCount, 3, seed = seed)
       .map(v => 1.0 -> Vectors.dense(v.toArray))
 
   // Generate negative observations following a distribution ~ N((10.0, 10.0, 10.0), I_3)
   val negativeData =
-    normalVectorRDD(spark.sparkContext, smallCount, 3, seed = seed)
+    normalVectorRDD(sc, smallCount, 3, seed = seed)
       .map(v => 0.0 -> Vectors.dense(v.toArray.map(_ + 10.0)))
 
   val stageNames = Array("label_prediction", "label_rawPrediction", "label_probability")
@@ -101,13 +102,15 @@ class BinaryClassificationModelSelectorTest extends FlatSpec with TestSparkConte
 
   Spec(BinaryClassificationModelSelector.getClass) should  "properly select models to try" in {
     val modelSelector = BinaryClassificationModelSelector
-      .withCrossValidation(modelTypesToUse = Seq(BMT.OpLogisticRegression, BMT.OpRandomForestClassifier))
-      .setInput(label.asInstanceOf[Feature[RealNN]], features)
+      .withCrossValidation(
+        modelTypesToUse = Seq(BMT.OpLogisticRegression, BMT.OpRandomForestClassifier, BMT.OpXGBoostClassifier)
+      ).setInput(label.asInstanceOf[Feature[RealNN]], features)
 
-    modelSelector.models.size shouldBe 2
+    modelSelector.models.size shouldBe 3
     modelSelector.models.exists(_._1.getClass.getSimpleName == BMT.OpLogisticRegression.entryName) shouldBe true
     modelSelector.models.exists(_._1.getClass.getSimpleName == BMT.OpRandomForestClassifier.entryName) shouldBe true
     modelSelector.models.exists(_._1.getClass.getSimpleName == BMT.OpNaiveBayes.entryName) shouldBe false
+    modelSelector.models.exists(_._1.getClass.getSimpleName == BMT.OpXGBoostClassifier.entryName) shouldBe true
   }
 
   it should "split into training and test even if the balancing is not desired" in {
@@ -169,8 +172,9 @@ class BinaryClassificationModelSelectorTest extends FlatSpec with TestSparkConte
   }
 
   it should "fit and predict for default models" in {
-
-    val modelToTry = BinaryClassificationModelSelector.modelNames(scala.util.Random.nextInt(4))
+    // Take one random model type each time
+    val defaultModels = BinaryClassificationModelSelector.Defaults.modelTypesToUse
+    val modelToTry = defaultModels(scala.util.Random.nextInt(defaultModels.size))
 
     val testEstimator =
       BinaryClassificationModelSelector
@@ -256,7 +260,7 @@ class BinaryClassificationModelSelectorTest extends FlatSpec with TestSparkConte
 
     val crossEntropy = Evaluators.BinaryClassification.custom(
       metricName = "cross entropy",
-      isLargerBetter = false,
+      largerBetter = false,
       evaluateFn = crossEntropyFun
     )
 
@@ -300,7 +304,7 @@ class BinaryClassificationModelSelectorTest extends FlatSpec with TestSparkConte
 
     val crossEntropy = Evaluators.BinaryClassification.custom(
       metricName = "cross entropy",
-      isLargerBetter = false,
+      largerBetter = false,
       evaluateFn = crossEntropyFun
     )
 

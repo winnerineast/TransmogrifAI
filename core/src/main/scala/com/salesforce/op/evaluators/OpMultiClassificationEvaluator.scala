@@ -34,6 +34,8 @@ import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import com.salesforce.op.UID
 import com.twitter.algebird.Monoid._
 import com.twitter.algebird.Operators._
+import com.twitter.algebird.Tuple2Semigroup
+import com.salesforce.op.utils.spark.RichEvaluator._
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.ml.param.{DoubleArrayParam, IntArrayParam}
@@ -56,7 +58,6 @@ import org.slf4j.LoggerFactory
 private[op] class OpMultiClassificationEvaluator
 (
   override val name: EvalMetric = OpEvaluatorNames.Multi,
-  override val isLargerBetter: Boolean = true,
   override val uid: String = UID[OpMultiClassificationEvaluator]
 ) extends OpMultiClassificationEvaluatorBase[MultiClassificationMetrics](uid) {
 
@@ -85,9 +86,7 @@ private[op] class OpMultiClassificationEvaluator
   def setThresholds(v: Array[Double]): this.type = set(thresholds, v)
 
   override def evaluateAll(data: Dataset[_]): MultiClassificationMetrics = {
-
     val labelColName = getLabelCol
-
     val dataUse = makeDataToUse(data, labelColName)
 
     val (predictionColName, rawPredictionColName, probabilityColName) = (getPredictionValueCol,
@@ -101,12 +100,10 @@ private[op] class OpMultiClassificationEvaluator
     import dataUse.sparkSession.implicits._
     val rdd = dataUse.select(predictionColName, labelColName).as[(Double, Double)].rdd
     if (rdd.isEmpty()) {
-      log.error("The dataset is empty")
+      log.warn("The dataset is empty. Returning empty metrics.")
       MultiClassificationMetrics(0.0, 0.0, 0.0, 0.0,
-        ThresholdMetrics(Seq.empty, Seq.empty, Map.empty, Map.empty, Map.empty)
-      )
+        ThresholdMetrics(Seq.empty, Seq.empty, Map.empty, Map.empty, Map.empty))
     } else {
-
       val multiclassMetrics = new MulticlassMetrics(rdd)
       val error = 1.0 - multiclassMetrics.accuracy
       val precision = multiclassMetrics.weightedPrecision
@@ -190,7 +187,8 @@ private[op] class OpMultiClassificationEvaluator
     def computeMetrics(scoresAndLabels: (Array[Double], Double)): MetricsMap = {
       val scores: Array[Double] = scoresAndLabels._1
       val label: Label = scoresAndLabels._2.toInt
-      val trueClassScore: Double = scores(label)
+      // The label may be unseen during model training, so treat scores for unseen classes as all being zero
+      val trueClassScore: Double = scores.lift(label).getOrElse(0.0)
       val topNsAndScores: Map[Label, Array[(Double, Int)]] = topNs.map(t => t -> scores.zipWithIndex.sortBy(-_._1)
         .take(t)).toMap
       val topNScores: Map[Label, Array[Double]] = topNsAndScores.mapValues(_.map(_._1))
@@ -226,30 +224,33 @@ private[op] class OpMultiClassificationEvaluator
         .map(_ -> (new Array[Long](nThresholds), new Array[Long](nThresholds)))
         .toMap[Label, CorrIncorr]
 
-    val agg: MetricsMap =
-      data.treeAggregate[MetricsMap](zeroValue)(combOp = _ + _, seqOp = _ + computeMetrics(_))
+    implicit val sgTuple2 = new Tuple2Semigroup[Array[Long], Array[Long]]()
+    val agg: MetricsMap = data.treeAggregate[MetricsMap](zeroValue)(combOp = _ + _, seqOp = _ + computeMetrics(_))
 
     val nRows = data.count()
     ThresholdMetrics(
       topNs = topNs,
       thresholds = thresholds,
-      correctCounts = agg.mapValues { case (cor, _) => cor.toSeq },
-      incorrectCounts = agg.mapValues { case (_, incor) => incor.toSeq },
-      noPredictionCounts = agg.mapValues { case (cor, incor) =>
-        (Array.fill(nThresholds)(nRows) + cor.map(-_) + incor.map(-_)).toSeq
+      correctCounts = agg.map { case (k, (cor, _)) => k -> cor.toSeq },
+      incorrectCounts = agg.map { case (k, (_, incor)) => k -> incor.toSeq },
+      noPredictionCounts = agg.map { case (k, (cor, incor)) =>
+        k -> (Array.fill(nThresholds)(nRows) + cor.map(-_) + incor.map(-_)).toSeq
       }
     )
   }
 
-
-  final protected def getMultiEvaluatorMetric(metricName: ClassificationEvalMetric, dataset: Dataset[_]): Double = {
+  final protected def getMultiEvaluatorMetric(
+    metricName: ClassificationEvalMetric,
+    dataset: Dataset[_],
+    default: => Double
+  ): Double = {
     val labelName = getLabelCol
     val dataUse = makeDataToUse(dataset, labelName)
     new MulticlassClassificationEvaluator()
       .setLabelCol(labelName)
       .setPredictionCol(getPredictionValueCol)
       .setMetricName(metricName.sparkEntryName)
-      .evaluate(dataUse)
+      .evaluateOrDefault(dataUse, default = default)
   }
 
 }

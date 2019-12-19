@@ -47,7 +47,7 @@ import org.scalatest.junit.JUnitRunner
 @RunWith(classOf[JUnitRunner])
 class DecisionTreeNumericMapBucketizerTest extends OpEstimatorSpec[OPVector,
   BinaryModel[RealNN, RealMap, OPVector], DecisionTreeNumericMapBucketizer[Double, RealMap]]
-  with DecisionTreeNumericBucketizerAsserts
+  with DecisionTreeNumericBucketizerAsserts with AttributeAsserts
 {
   import OPMapVectorizerTestHelper._
 
@@ -81,7 +81,7 @@ class DecisionTreeNumericMapBucketizerTest extends OpEstimatorSpec[OPVector,
       numerics.limit(total).zip(numerics.limit(total)).zip(numerics.limit(total)).zip(labelData)
         .map { case (((f1, f2), f3), f4) => (f1, f2, f3, f4) }
     val (data, f1, f2, f3, label) = TestFeatureBuilder[Real, Real, Real, RealNN](rawData)
-    val realMapFeature = makeTernaryOPMapTransformer[Real, RealMap, Double](f1, f2, f3)
+    val realMapFeature = makeMapifyTransformer[Real, RealMap, Double](f1, f2, f3)
     lazy val modelLocation = tempDir + "/dt-map-buck-test-model-" + org.joda.time.DateTime.now().getMillis
   }
 
@@ -90,7 +90,8 @@ class DecisionTreeNumericMapBucketizerTest extends OpEstimatorSpec[OPVector,
     val (min, max) = (0.0, 100.0)
     val currencies: RandomReal[Currency] =
       RandomReal.uniform[Currency](minValue = min, maxValue = max).withProbabilityOfEmpty(0.1)
-    val correlated = currencies.limit(total)
+    val correlated: Seq[Currency] = (0 until total).map(x => (x * max/total).toCurrency)
+
     val labelData = correlated.map(c => {
       c.value.map {
         case v if v < 15 => 0.0
@@ -103,7 +104,7 @@ class DecisionTreeNumericMapBucketizerTest extends OpEstimatorSpec[OPVector,
       correlated.zip(currencies.limit(total)).zip(correlated).zip(labelData)
         .map { case (((f1, f2), f3), f4) => (f1, f2, f3, f4) }
     val (data, f1, f2, f3, label) = TestFeatureBuilder[Currency, Currency, Currency, RealNN](rawData)
-    val currencyMapFeature = makeTernaryOPMapTransformer[Currency, CurrencyMap, Double](f1, f2, f3)
+    val currencyMapFeature = makeMapifyTransformer[Currency, CurrencyMap, Double](f1, f2, f3)
     val expectedSplits = Array(Double.NegativeInfinity, 15, 26, 91, Double.PositiveInfinity)
   }
 
@@ -140,7 +141,7 @@ class DecisionTreeNumericMapBucketizerTest extends OpEstimatorSpec[OPVector,
     val model = workflow.setInputDataset(data).setResultFeatures(bucketizer.getOutput()).train()
     model.save(modelLocation)
     val loaded = workflow.loadModel(modelLocation)
-    loaded.stages.map(_.uid) should contain (bucketizer.uid)
+    loaded.getStages().map(_.uid) should contain (bucketizer.uid)
   }
 
   it should "not find any splits on random data" in new NormalData {
@@ -228,6 +229,8 @@ class DecisionTreeNumericMapBucketizerTest extends OpEstimatorSpec[OPVector,
     )
     val scored = model.setInputDataset(data).score(keepIntermediateFeatures = true)
     val res = scored.collect(out)
+    val field = scored.schema(out.name)
+    assertNominal(field, Array.fill(res.head.value.size)(true), res)
     assertMetadata(
       shouldSplit = stage.shouldSplitByKey.toArray.sortBy(_._1).map(_._2),
       splits = stage.splitsByKey.toArray.sortBy(_._1).map(_._2),

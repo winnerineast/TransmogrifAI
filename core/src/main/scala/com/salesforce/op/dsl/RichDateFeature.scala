@@ -33,7 +33,7 @@ package com.salesforce.op.dsl
 import com.salesforce.op.features.FeatureLike
 import com.salesforce.op.features.types._
 import com.salesforce.op.stages.base.unary.UnaryLambdaTransformer
-import com.salesforce.op.stages.impl.feature.{DateListPivot, DateToUnitCircleTransformer, TimePeriod, TransmogrifierDefaults}
+import com.salesforce.op.stages.impl.feature._
 import org.joda.time.{DateTime => JDateTime}
 
 
@@ -49,13 +49,24 @@ trait RichDateFeature {
 
     /**
      * Convert to DateList feature
+     *
      * @return
      */
     def toDateList(): FeatureLike[DateList] = {
       f.transformWith(
-        new UnaryLambdaTransformer[Date, DateList](operationName = "dateToList", _.value.toSeq.toDateList)
+        new UnaryLambdaTransformer[Date, DateList](
+          operationName = "dateToList",
+          new RichDateFeatureLambdas.ToDateList
+        )
       )
     }
+
+    /**
+     * Convert to specified time period
+     * @param period type of [[TimePeriod]] to convert date feature to
+     * @return Integer feature of time period value
+     */
+    def toTimePeriod(period: TimePeriod): FeatureLike[Integral] = f.transformWith(new TimePeriodTransformer(period))
 
     /**
      * transforms a Date field into a cartesian coordinate representation
@@ -63,7 +74,7 @@ trait RichDateFeature {
      *
      * @param timePeriod The time period to extract from the timestamp
      * @param others     Other features of same type
-     * enum from: DayOfMonth, DayOfWeek, DayOfYear, HourOfDay, WeekOfMonth, WeekOfYear
+     *                   enum from: DayOfMonth, DayOfWeek, DayOfYear, HourOfDay, WeekOfMonth, WeekOfYear
      */
     def toUnitCircle
     (
@@ -91,8 +102,7 @@ trait RichDateFeature {
      * @param dateListPivot name of the pivot type from [[DateListPivot]] enum
      * @param referenceDate reference date to compare against when [[DateListPivot]] is [[SinceFirst]] or [[SinceLast]]
      * @param trackNulls    option to keep track of values that were missing
-     * @param circularDateReps list of all the circular date representations that should be included
-     *                                    feature vector
+     * @param circularDateReps list of all the circular date representations that should be included in feature vector
      * @return result feature of type Vector
      */
     def vectorize
@@ -120,16 +130,24 @@ trait RichDateFeature {
 
     /**
      * Convert to DateTimeList feature
+     *
      * @return
      */
     def toDateTimeList(): FeatureLike[DateTimeList] = {
       f.transformWith(
         new UnaryLambdaTransformer[DateTime, DateTimeList](
           operationName = "dateTimeToList",
-          _.value.toSeq.toDateTimeList
+          new RichDateFeatureLambdas.ToDateTimeList
         )
       )
     }
+
+    /**
+     * Convert to specified time period
+     * @param period type of [[TimePeriod]] to convert date feature to
+     * @return Integer feature of time period value
+     */
+    def toTimePeriod(period: TimePeriod): FeatureLike[Integral] = f.transformWith(new TimePeriodTransformer(period))
 
     /**
      * transforms a DateTime field into a cartesian coordinate representation
@@ -137,7 +155,7 @@ trait RichDateFeature {
      *
      * @param timePeriod The time period to extract from the timestamp
      * @param others     Other features of same type
-     * enum from: DayOfMonth, DayOfWeek, DayOfYear, HourOfDay, WeekOfMonth, WeekOfYear
+     *                   enum from: DayOfMonth, DayOfWeek, DayOfYear, HourOfDay, WeekOfMonth, WeekOfYear
      */
     def toUnitCircle(
       timePeriod: TimePeriod = TimePeriod.HourOfDay,
@@ -164,8 +182,7 @@ trait RichDateFeature {
      * @param dateListPivot name of the pivot type from [[DateListPivot]] enum
      * @param referenceDate reference date to compare against when [[DateListPivot]] is [[SinceFirst]] or [[SinceLast]]
      * @param trackNulls    option to keep track of values that were missing
-     * @param circularDateReps list of all the circular date representations that should be included
-     *                                    feature vector
+     * @param circularDateReps list of all the circular date representations that should be included in feature vector
      * @return result feature of type Vector
      */
     def vectorize
@@ -182,6 +199,18 @@ trait RichDateFeature {
       if (timePeriods.isEmpty) time else (timePeriods :+ time).combine()
     }
 
+  }
+
+}
+
+object RichDateFeatureLambdas {
+
+  class ToDateList extends Function1[Date, DateList] with Serializable {
+    def apply(v: Date): DateList = v.value.toSeq.toDateList
+  }
+
+  class ToDateTimeList extends Function1[Date, DateTimeList] with Serializable {
+    def apply(v: Date): DateTimeList = v.value.toSeq.toDateTimeList
   }
 
 }

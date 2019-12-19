@@ -59,6 +59,13 @@ trait InputParams extends Params {
    */
   protected def checkInputLength(features: Array[_]): Boolean
 
+
+  /**
+   * Function to be called on setInput
+   */
+  protected def onSetInput(): Unit = {}
+
+
   /**
    * Sets input features
    *
@@ -67,13 +74,15 @@ trait InputParams extends Params {
    * @return this stage
    */
   final protected def setInputFeatures[S <: OPFeature](features: Array[S]): this.type = {
-    assert(
+    require(
       checkInputLength(features),
       "Number of input features must match the number expected by this type of pipeline stage"
     )
     set(inputFeatures, features.map(TransientFeature(_)))
+    onSetInput()
     this
   }
+
 
   private[op] def setInputFeatureArray[S <: OPFeature](features: Array[S]): this.type = setInputFeatures(features)
 

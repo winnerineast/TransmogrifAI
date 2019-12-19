@@ -30,9 +30,10 @@
 
 package com.salesforce.op.stages.impl.tuning
 
-import com.salesforce.op.stages.impl.selector.ModelSelectorNames
 import com.salesforce.op.test.TestSparkContext
 import com.salesforce.op.testkit.{RandomIntegral, RandomReal, RandomVector}
+import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.mllib.random.RandomRDDs
 import org.apache.spark.sql.Dataset
 import org.junit.runner.RunWith
 import org.scalatest.FlatSpec
@@ -40,8 +41,7 @@ import org.scalatest.junit.JUnitRunner
 
 
 @RunWith(classOf[JUnitRunner])
-class DataCutterTest extends FlatSpec with TestSparkContext {
-
+class DataCutterTest extends FlatSpec with TestSparkContext with SplitterSummaryAsserts {
   import spark.implicits._
 
   val labels = RandomIntegral.integrals(0, 1000).withProbabilityOfEmpty(0).limit(100000)
@@ -51,6 +51,7 @@ class DataCutterTest extends FlatSpec with TestSparkContext {
   }
   val vectors = RandomVector.sparse(RandomReal.poisson(2), 10).limit(100000)
 
+  val trainingLimitDefault = 1E6.toLong
   val data = labels.zip(vectors).zip(labelsBiased)
   val dataSize = data.size
   val randDF = sc.makeRDD(data.map { case ((l, v), b) => (l.toDouble.get, v.value, b.toString) }).toDF()
@@ -58,78 +59,175 @@ class DataCutterTest extends FlatSpec with TestSparkContext {
   val seed = 42L
 
   Spec[DataCutter] should "not filter out any data when the parameters are permissive" in {
-    val dataCutter = DataCutter(seed = seed).setMinLabelFraction(0.0).setMaxLabelCategories(100000)
-    val split = dataCutter.prepare(randDF)
-    split.train.count() shouldBe dataSize
-    val keptMeta = split.summary.get.asInstanceOf[DataCutterSummary].labelsKept
-    keptMeta.length shouldBe 1000
-    keptMeta should contain theSameElementsAs dataCutter.getLabelsToKeep
-    val dropMeta = split.summary.get.asInstanceOf[DataCutterSummary].labelsDropped
-    dropMeta.length shouldBe 0
-    dropMeta should contain theSameElementsAs dataCutter.getLabelsToDrop
+    val dc1 = DataCutter(seed = seed, minLabelFraction = 0.0, maxLabelCategories = 100000)
+    val s1 = dc1.preValidationPrepare(randDF)
+    val split1 = dc1.validationPrepare(randDF)
 
-    val split2 = DataCutter(seed = seed)
-      .setMinLabelFraction(0.0)
-      .setMaxLabelCategories(100000)
-      .prepare(biasDF)
-    split2.train.count() shouldBe dataSize
-    split2.summary.get.asInstanceOf[DataCutterSummary].labelsKept.length shouldBe 1000
-    split2.summary.get.asInstanceOf[DataCutterSummary].labelsDropped.length shouldBe 0
-  }
+    split1.count() shouldBe dataSize
+    assertDataCutterSummary(s1.summaryOpt) { s =>
+      s.labelsKept.length shouldBe 1000
+      s.labelsDropped.length shouldBe 0
+      s shouldBe DataCutterSummary(
+        preSplitterDataCount = dataSize,
+        downSamplingFraction = 1.0,
+        dc1.getLabelsToKeep,
+        dc1.getLabelsToDrop,
+        dc1.getLabelsDroppedTotal
+      )
+    }
 
-  it should "throw an error when all the data is filtered out" in {
-    val dataCutter = DataCutter(seed = seed)
-      .setMinLabelFraction(0.4)
-    assertThrows[RuntimeException] {
-      dataCutter.prepare(randDF)
+    val dc2 = DataCutter(seed = seed, minLabelFraction = 0.0, maxLabelCategories = 100000)
+    val s2 = dc2.preValidationPrepare(biasDF)
+    val split2 = dc2.validationPrepare(biasDF)
+
+    split2.count() shouldBe dataSize
+    assertDataCutterSummary(s2.summaryOpt) { s =>
+      s.labelsKept.length shouldBe 1000
+      s.labelsDropped.length shouldBe 0
+      s shouldBe DataCutterSummary(
+        preSplitterDataCount = dataSize,
+        downSamplingFraction = 1.0,
+        dc2.getLabelsToKeep,
+        dc2.getLabelsToDrop,
+        dc2.getLabelsDroppedTotal
+      )
     }
   }
 
-  it should "filter out all but the top N label categories" in {
-    val split = DataCutter(seed = seed)
+  it should "set and get all data cutter params" in {
+    val maxRows = dataSize / 2
+    val downSampleFraction = maxRows / dataSize.toDouble
+
+    val dataCutter = DataCutter()
+      .setSeed(seed)
+      .setReserveTestFraction(0.0)
+      .setMaxLabelCategories(100000)
       .setMinLabelFraction(0.0)
-      .setMaxLabelCategories(100)
-      .setReserveTestFraction(0.5)
-      .prepare(randDF)
+      .setMaxTrainingSample(maxRows)
+      .setDownSampleFraction(downSampleFraction)
 
-    findDistinct(split.train).count() shouldBe 100
-    split.summary.get.asInstanceOf[DataCutterSummary].labelsKept.length shouldBe 100
-    split.summary.get.asInstanceOf[DataCutterSummary].labelsDropped.length shouldBe 900
+    dataCutter.getSeed shouldBe seed
+    dataCutter.getReserveTestFraction shouldBe 0.0
+    dataCutter.getMaxLabelCategories shouldBe 100000
+    dataCutter.getMinLabelFraction shouldBe 0.0
+    dataCutter.getMaxTrainingSample shouldBe maxRows
+    dataCutter.getDownSampleFraction shouldBe downSampleFraction
+  }
 
-    val split2 = DataCutter(seed = seed).setMaxLabelCategories(3).prepare(biasDF)
-    findDistinct(split2.train).collect().toSet shouldEqual Set(0.0, 1.0, 2.0)
-    split2.summary.get.asInstanceOf[DataCutterSummary].labelsKept.length shouldBe 3
-    split2.summary.get.asInstanceOf[DataCutterSummary].labelsDropped.length shouldBe 997
+  it should "down-sample when the data count is above the default training limit" in {
+    val numRows = trainingLimitDefault * 2
+    val dataCutter = DataCutter()
+    val data =
+      RandomRDDs.normalVectorRDD(sc, numRows, 3, seed = seed)
+        .map(v => (1.0, Vectors.dense(v.toArray), "A")).toDF()
+
+    dataCutter.preValidationPrepare(data)
+    val dataBalanced = dataCutter.validationPrepare(data)
+    // validationPrepare calls the data sample method that samples the data to a target ratio but there is an epsilon
+    // to how precise this function is which is why we need to check around that epsilon
+    val samplingErrorEpsilon = (0.1 * trainingLimitDefault).toLong
+
+    dataCutter.getDownSampleFraction shouldBe 0.5
+    dataBalanced.count() shouldBe trainingLimitDefault +- samplingErrorEpsilon
+  }
+
+  it should "throw an error when all the data is filtered out" in {
+    val dataCutter = DataCutter(seed = seed, minLabelFraction = 0.4)
+    assertThrows[RuntimeException](dataCutter.preValidationPrepare(randDF))
+  }
+
+  it should "throw an error when prepare is called before examine" in {
+    val dataCutter = DataCutter(seed = seed, minLabelFraction = 0.4)
+    intercept[RuntimeException](dataCutter.validationPrepare(randDF)).getMessage shouldBe
+      "requirement failed: Cannot call validationPrepare until preValidationPrepare has been called"
+  }
+
+  it should "filter out all but the top N label categories" in {
+    val dc1 = DataCutter(seed = seed, minLabelFraction = 0.0, maxLabelCategories = 100, reserveTestFraction = 0.5)
+    val s1 = dc1.preValidationPrepare(randDF)
+    val split1 = dc1.validationPrepare(s1.dataFrame.get)
+
+    findDistinct(split1).count() shouldBe 100
+    assertDataCutterSummary(s1.summaryOpt) { s =>
+      s.labelsKept.length shouldBe 100
+      s.labelsDropped.length shouldBe 10
+      s.labelsDroppedTotal shouldBe 900
+      s shouldBe DataCutterSummary(
+        preSplitterDataCount = dataSize,
+        downSamplingFraction = 1.0,
+        dc1.getLabelsToKeep,
+        dc1.getLabelsToDrop,
+        dc1.getLabelsDroppedTotal
+      )
+    }
+
+    val dc2 = DataCutter(seed = seed).setMaxLabelCategories(3)
+    val s2 = dc2.preValidationPrepare(biasDF)
+    val split2 = dc2.validationPrepare(s2.dataFrame.get)
+
+    findDistinct(split2).collect().toSet shouldEqual Set(0.0, 1.0, 2.0)
+    assertDataCutterSummary(s2.summaryOpt) { s =>
+      s.labelsKept.length shouldBe 3
+      s.labelsDropped.length shouldBe 10
+      s.labelsDroppedTotal shouldBe 997
+      s shouldBe DataCutterSummary(
+        preSplitterDataCount = dataSize,
+        downSamplingFraction = 1.0,
+        dc2.getLabelsToKeep,
+        dc2.getLabelsToDrop,
+        dc2.getLabelsDroppedTotal
+      )
+    }
   }
 
   it should "filter out anything that does not have at least the specified data fraction" in {
-    val split = DataCutter(seed = seed)
-      .setMinLabelFraction(0.0012)
-      .setMaxLabelCategories(100000)
-      .setReserveTestFraction(0.5)
-      .prepare(randDF)
+    val dc1 = DataCutter(seed = seed, minLabelFraction = 0.0012, maxLabelCategories = 100000, reserveTestFraction = 0.5)
+    val s1 = dc1.preValidationPrepare(randDF)
+    val split1 = dc1.validationPrepare(s1.dataFrame.get)
 
     val distinct = findDistinct(randDF).count()
-    val distTrain = findDistinct(split.train)
+    val distTrain = findDistinct(split1)
     distTrain.count() < distinct shouldBe true
     distTrain.count() > 0 shouldBe true
-    split.summary.get.asInstanceOf[DataCutterSummary].labelsKept.length +
-      split.summary.get.asInstanceOf[DataCutterSummary].labelsDropped.length shouldBe distinct
+    assertDataCutterSummary(s1.summaryOpt) { s =>
+      s.labelsKept.length + s.labelsDroppedTotal shouldBe distinct
+      s shouldBe DataCutterSummary(
+        preSplitterDataCount = dataSize,
+        downSamplingFraction = 1.0,
+        dc1.getLabelsToKeep,
+        dc1.getLabelsToDrop,
+        dc1.getLabelsDroppedTotal
+      )
+    }
 
-    val split2 = DataCutter(seed = seed).setMinLabelFraction(0.20).setReserveTestFraction(0.5).prepare(biasDF)
-    findDistinct(split2.train).count() shouldBe 3
-    split2.summary.get.asInstanceOf[DataCutterSummary].labelsKept.length shouldBe 3
-    split2.summary.get.asInstanceOf[DataCutterSummary].labelsDropped.length shouldBe 997
+    val dc2 = DataCutter(seed = seed, minLabelFraction = 0.2, reserveTestFraction = 0.5)
+    val s2 = dc2.preValidationPrepare(biasDF)
+    val split2 = dc2.validationPrepare(s2.dataFrame.get)
+    findDistinct(split2).count() shouldBe 3
+    assertDataCutterSummary(s2.summaryOpt) { s =>
+      s.labelsKept.length shouldBe 3
+      s.labelsDroppedTotal shouldBe 997
+      s.labelsDropped.length shouldBe 10
+      s shouldBe DataCutterSummary(
+        preSplitterDataCount = dataSize,
+        downSamplingFraction = 1.0,
+        dc2.getLabelsToKeep,
+        dc2.getLabelsToDrop,
+        dc2.getLabelsDroppedTotal
+      )
+    }
   }
 
-  it should "filter out using the var labelsToKeep" in {
-    val keep = Set(0.0, 1.0)
-    val drop = Set(5.0, 7.0)
-    val dataCutter = DataCutter(seed = seed).setLabels(keep = keep, drop = drop)
-    val split = dataCutter.prepare(randDF)
-    findDistinct(split.train).collect().sorted shouldBe Array(0.0, 1.0)
-    dataCutter.getLabelsToKeep shouldBe keep.toArray
-    dataCutter.getLabelsToDrop shouldBe drop.toArray
+  it should "filter out using labels to keep/drop params" in {
+    val keep = Seq(0.0, 1.0)
+    val drop = Seq(5.0, 7.0)
+    val dc = DataCutter(seed = seed).setLabels(keep = keep, dropTopK = drop, labelsDropped = 2)
+    val s1 = dc.preValidationPrepare(randDF)
+    val split = dc.validationPrepare(s1.dataFrame.get)
+
+    findDistinct(split).collect().sorted shouldBe Array(0.0, 1.0)
+    dc.getLabelsToKeep shouldBe keep.toArray
+    dc.getLabelsToDrop shouldBe drop.toArray
   }
 
   private def findDistinct(d: Dataset[_]): Dataset[Double] = d.toDF().map(_.getDouble(0)).distinct()

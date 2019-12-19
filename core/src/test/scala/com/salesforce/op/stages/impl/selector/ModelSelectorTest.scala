@@ -57,7 +57,7 @@ import org.slf4j.LoggerFactory
 @RunWith(classOf[JUnitRunner])
 class ModelSelectorTest extends OpEstimatorSpec[Prediction, SelectedModel, ModelSelector[_, _]]
   with PredictionEquality with CompareParamGrid {
-
+  import ModelSelectorTest._
   val log = LoggerFactory.getLogger(this.getClass)
 
   val (seed, smallCount, bigCount) = (1234L, 20, 80)
@@ -66,12 +66,12 @@ class ModelSelectorTest extends OpEstimatorSpec[Prediction, SelectedModel, Model
 
   // Generate positive observations following a distribution ~ N((0.0, 0.0, 0.0), I_3)
   val positiveData =
-    normalVectorRDD(spark.sparkContext, bigCount, 3, seed = seed)
+    normalVectorRDD(sc, bigCount, 3, seed = seed)
       .map(v => 1.0 -> Vectors.dense(v.toArray))
 
   // Generate negative observations following a distribution ~ N((10.0, 10.0, 10.0), I_3)
   val negativeData =
-    normalVectorRDD(spark.sparkContext, smallCount, 3, seed = seed)
+    normalVectorRDD(sc, smallCount, 3, seed = seed)
       .map(v => 0.0 -> Vectors.dense(v.toArray.map(_ + 10.0)))
 
   val data = positiveData.union(negativeData).toDF("label", "features")
@@ -82,23 +82,23 @@ class ModelSelectorTest extends OpEstimatorSpec[Prediction, SelectedModel, Model
 
   private val lr = new OpLogisticRegression()
   private val lrParams = new ParamGridBuilder()
-    .addGrid(lr.regParam, Array(0.1, 100))
-    .addGrid(lr.elasticNetParam, Array(0, 0.5)).build()
+    .addGrid(lr.regParam, Array(0.1, 10000))
+    .addGrid(lr.elasticNetParam, Array(0.5)).build()
 
   private val rf = new OpRandomForestClassifier()
   private val rfParams = new ParamGridBuilder()
     .addGrid(rf.numTrees, Array(2, 4))
-    .addGrid(rf.minInfoGain, Array(100.0, 10.0)).build()
+    .addGrid(rf.minInfoGain, Array(1000.0, 100.0)).build()
 
   private val linR = new OpLinearRegression()
   private val linRParams = new ParamGridBuilder()
-    .addGrid(linR.regParam, Array(0.1, 100))
+    .addGrid(linR.regParam, Array(0.1, 1000))
     .addGrid(linR.maxIter, Array(10, 20)).build()
 
   private val rfR = new OpRandomForestRegressor()
   private val rfRParams = new ParamGridBuilder()
     .addGrid(rfR.numTrees, Array(2, 4))
-    .addGrid(rfR.minInfoGain, Array(100.0, 10.0)).build()
+    .addGrid(rfR.minInfoGain, Array(1000.0, 100.0)).build()
 
   val (inputData, rawFeature1, feature2) = TestFeatureBuilder("label", "features",
     Seq[(RealNN, OPVector)](
@@ -120,7 +120,7 @@ class ModelSelectorTest extends OpEstimatorSpec[Prediction, SelectedModel, Model
       numFolds = 3, seed = seed, Evaluators.BinaryClassification.auPR(), stratify = false, parallelism = 1),
     splitter = Option(DataBalancer(sampleFraction = 0.5, seed = 11L)),
     models = Seq(lr -> Array.empty[ParamMap]),
-    evaluators = Seq(new OpBinaryClassificationEvaluator)
+    evaluators = Seq(new OpBinaryClassificationEvaluator, new OpBinScoreEvaluator)
   ).setInput(feature1, feature2)
 
   val expectedResult = Seq(
@@ -144,7 +144,7 @@ class ModelSelectorTest extends OpEstimatorSpec[Prediction, SelectedModel, Model
       validator = validatorCV,
       splitter = Option(DataBalancer(sampleFraction = 0.5, seed = 11L)),
       models = Seq(lr -> lrParams, rf -> rfParams),
-      evaluators = Seq(new OpBinaryClassificationEvaluator)
+      evaluators = Seq(new OpBinaryClassificationEvaluator, new OpBinScoreEvaluator())
     ).setInput(label, features)
 
     val model = testEstimator.fit(data)
@@ -229,7 +229,7 @@ class ModelSelectorTest extends OpEstimatorSpec[Prediction, SelectedModel, Model
       validator = validatorCV,
       splitter = Option(DataBalancer(sampleFraction = 0.5, seed = 11L)),
       models = Seq(test -> testParams),
-      evaluators = Seq(new OpBinaryClassificationEvaluator)
+      evaluators = Seq(new OpBinaryClassificationEvaluator, new OpBinScoreEvaluator())
     ).setInput(label, features)
 
     val model = testEstimator.fit(data)
@@ -263,15 +263,17 @@ class ModelSelectorTest extends OpEstimatorSpec[Prediction, SelectedModel, Model
 
   }
 }
+object ModelSelectorTest {
 
-class TestEstimator extends BinaryEstimator[RealNN, OPVector, Prediction]("test", UID[TestEstimator]) {
-  override def fitFn(dataset: Dataset[(Option[Double], Vector)]): TestModel = new TestModel(uid)
-}
+  class TestEstimator extends BinaryEstimator[RealNN, OPVector, Prediction]("test", UID[TestEstimator]) {
+    override def fitFn(dataset: Dataset[(Option[Double], Vector)]): TestModel = new TestModel(uid)
+  }
 
-class TestModel(uid: String) extends BinaryModel[RealNN, OPVector, Prediction]("test", uid){
-  override def transformFn: (RealNN, OPVector) => Prediction = (l: RealNN, f: OPVector) => {
-    val pred = l.value.get
-    val raw = Array(pred, 1 - pred)
-    Prediction(pred, raw, raw)
+  class TestModel(uid: String) extends BinaryModel[RealNN, OPVector, Prediction]("test", uid) {
+    override def transformFn: (RealNN, OPVector) => Prediction = (l: RealNN, f: OPVector) => {
+      val pred = l.value.get
+      val raw = Array(pred, 1 - pred)
+      Prediction(pred, raw, raw)
+    }
   }
 }

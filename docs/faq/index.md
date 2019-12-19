@@ -2,7 +2,7 @@
 
 ## What is TransmogrifAI?
 
-TransmogrifAI is an AutoML library written in Scala that runs on top of Spark. It was developed with a focus on enhancing machine learning developer productivity through machine learning automation, and an API that enforces compile-time type-safety, modularity and reuse.
+TransmogrifAI is an AutoML library written in Scala that runs on top of Apache Spark. It was developed with a focus on enhancing machine learning developer productivity through machine learning automation, and an API that enforces compile-time type-safety, modularity and reuse.
 
 Use TransmogrifAI if you need a machine learning library to:
 
@@ -57,5 +57,5 @@ import com.salesforce.op.utils.spark.RichStructType._
 You can! Simply use the `.setInputRDD(myRDD)` or `.setInputDataSet(myDataSet)` methods on Workflow to pass in your data.
 
 ## How do I examine intermediate data when trying to debug my ML workflow?
-You can generate data up to any particular point in the Workflow using the method `.computeDataUpTo(myFeature)`. Calling this method on your Workflow or WorkflowModel will compute a DataFrame which contains all of the rows for features created up to that point in your flow.
+You can generate data up to any particular point in the OpWorkflow using the method `.computeDataUpTo(myFeature)`. Calling this method on your OpWorkflow or OpWorkflowModel will compute a DataFrame which contains all of the rows for features created up to that point in your flow.
 

@@ -5,40 +5,59 @@
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
+ * * Redistributions of source code must retain the above copyright notice, this
+ *   list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
+ * * Redistributions in binary form must reproduce the above copyright notice,
+ *   this list of conditions and the following disclaimer in the documentation
+ *   and/or other materials provided with the distribution.
  *
- * 3. Neither the name of Salesforce.com nor the names of its contributors may
- * be used to endorse or promote products derived from this software without
- * specific prior written permission.
+ * * Neither the name of the copyright holder nor the names of its
+ *   contributors may be used to endorse or promote products derived from
+ *   this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 package com.salesforce.hw.iris
 
+import com.salesforce.hw.iris.IrisFeatures._
 import com.salesforce.op.features.FeatureBuilder
 import com.salesforce.op.features.types._
 
 trait IrisFeatures extends Serializable {
-  val id = FeatureBuilder.Integral[Iris].extract(_.getID.toIntegral).asPredictor
-  val sepalLength = FeatureBuilder.Real[Iris].extract(_.getSepalLength.toReal).asPredictor
-  val sepalWidth = FeatureBuilder.Real[Iris].extract(_.getSepalWidth.toReal).asPredictor
-  val petalLength = FeatureBuilder.Real[Iris].extract(_.getPetalLength.toReal).asPredictor
-  val petalWidth = FeatureBuilder.Real[Iris].extract(_.getPetalWidth.toReal).asPredictor
-  val irisClass = FeatureBuilder.Text[Iris].extract(_.getClass$.toText).asResponse
+  val sepalLength = FeatureBuilder.Real[Iris].extract(new SepalLength).asPredictor
+  val sepalWidth = FeatureBuilder.Real[Iris].extract(new SepalWidth).asPredictor
+  val petalLength = FeatureBuilder.Real[Iris].extract(new PetalLength).asPredictor
+  val petalWidth = FeatureBuilder.Real[Iris].extract(new PetalWidth).asPredictor
+  val irisClass = FeatureBuilder.Text[Iris].extract(new IrisClass).asResponse
+}
+
+object IrisFeatures {
+  abstract class IrisFeatureFunc[T] extends Function[Iris, T] with Serializable
+
+  class RealExtract(f: Iris => Double) extends IrisFeatureFunc[Real] {
+    override def apply(v1: Iris): Real = f(v1).toReal
+  }
+
+  class SepalLength extends RealExtract(_.sepalLength)
+
+  class SepalWidth extends RealExtract(_.sepalWidth)
+
+  class PetalLength extends RealExtract(_.petalLength)
+
+  class PetalWidth extends RealExtract(_.petalWidth)
+
+  class IrisClass extends IrisFeatureFunc[Text] {
+    override def apply(v1: Iris): Text = v1.irisClass.toText
+  }
 }

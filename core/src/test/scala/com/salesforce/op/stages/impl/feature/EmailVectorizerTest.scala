@@ -45,7 +45,8 @@ import org.scalatest.junit.JUnitRunner
 
 @RunWith(classOf[JUnitRunner])
 class EmailVectorizerTest
-  extends FlatSpec with FeatureTestBase with RichMapFeature with RichFeature with RichTextFeature {
+  extends FlatSpec with FeatureTestBase with RichMapFeature with RichFeature with RichTextFeature
+    with AttributeAsserts {
   val emailKey = "Email1"
   val emailKey2 = "Email2"
   val emails = (RandomText.emails("salesforce.com").take(2) ++ RandomText.emails("einstein.ai").take(2)).toSeq
@@ -80,8 +81,13 @@ class EmailVectorizerTest
   ).map(_.toOPVector)
 
 
-  def transformAndCollect(ds: DataFrame, feature: FeatureLike[OPVector]): Array[OPVector] =
-    new OpWorkflow().setResultFeatures(feature).transform(ds).collect(feature)
+  def transformAndCollect(ds: DataFrame, feature: FeatureLike[OPVector]): Array[OPVector] = {
+    val transformed = new OpWorkflow().setResultFeatures(feature).transform(ds)
+    val field = transformed.schema(feature.name)
+    val collected = transformed.collect(feature)
+    assertNominal(field, Array.fill(collected.head.value.size)(true), collected)
+    collected
+  }
 
   Spec[RichEmailMapFeature] should "vectorize EmailMaps correctly" in {
     val (ds1, f1) = TestFeatureBuilder(emails.map(e => Map(emailKey -> e.value.get).toEmailMap))
@@ -190,5 +196,16 @@ class EmailVectorizerTest
     result(0) shouldBe result(1)
     result(2) shouldBe result(3)
     result should contain theSameElementsAs expectedEmail
+  }
+  it should "remove high cardinality features" in {
+    val (ds2, f2) = TestFeatureBuilder(emails)
+    val vectorized = f2.vectorize(topK = TopK, minSupport = MinSupport,
+      cleanText = CleanText, maxPctCardinality = 0.1)
+    vectorized.originStage shouldBe a[OpTextPivotVectorizer[_]]
+    vectorized shouldBe a[FeatureLike[_]]
+
+    val result = transformAndCollect(ds2, vectorized)
+
+    result should contain theSameElementsAs Array.fill(ds2.count().toInt)(OPVector.empty)
   }
 }

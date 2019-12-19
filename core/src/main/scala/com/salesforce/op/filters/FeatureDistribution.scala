@@ -30,23 +30,30 @@
 
 package com.salesforce.op.filters
 
-import com.salesforce.op.features.FeatureDistributionLike
-import com.salesforce.op.stages.impl.feature.{HashAlgorithm, Inclusion, NumericBucketizer}
+import java.util.Objects
+
+import com.salesforce.op.features.{FeatureDistributionLike, FeatureDistributionType}
+import com.salesforce.op.stages.impl.feature.{HashAlgorithm, Inclusion, NumericBucketizer, TextStats}
+import com.salesforce.op.utils.json.EnumEntrySerializer
 import com.twitter.algebird.Monoid._
+import com.twitter.algebird._
 import com.twitter.algebird.Operators._
-import com.twitter.algebird.Semigroup
 import org.apache.spark.mllib.feature.HashingTF
+import org.json4s.jackson.Serialization
+import org.json4s.{DefaultFormats, FieldSerializer, Formats}
+
+import scala.util.Try
 
 /**
  * Class containing summary information for a feature
  *
- * @param name name of the feature
- * @param key map key associated with distribution (when the feature is a map)
- * @param count total count of feature seen
- * @param nulls number of empties seen in feature
+ * @param name         name of the feature
+ * @param key          map key associated with distribution (when the feature is a map)
+ * @param count        total count of feature seen
+ * @param nulls        number of empties seen in feature
  * @param distribution binned counts of feature values (hashed for strings, evenly spaced bins for numerics)
- * @param summaryInfo either min and max number of tokens for text data,
- *                    or splits used for bins for numeric data
+ * @param summaryInfo  either min and max number of tokens for text data, or splits used for bins for numeric data
+ * @param `type`       feature distribution type: training or scoring
  */
 case class FeatureDistribution
 (
@@ -55,7 +62,10 @@ case class FeatureDistribution
   count: Long,
   nulls: Long,
   distribution: Array[Double],
-  summaryInfo: Array[Double]
+  summaryInfo: Array[Double],
+  moments: Option[Moments] = None,
+  cardEstimate: Option[TextStats] = None,
+  `type`: FeatureDistributionType = FeatureDistributionType.Training
 ) extends FeatureDistributionLike {
 
   /**
@@ -64,12 +74,17 @@ case class FeatureDistribution
   def featureKey: FeatureKey = (name, key)
 
   /**
-   * Check that feature distributions belong to the same feature and key.
+   * Check that feature distributions belong to the same feature, key and type.
    *
    * @param fd distribution to compare to
    */
-  def checkMatch(fd: FeatureDistribution): Unit =
-    assert(name == fd.name && key == fd.key, "Name and key must match to compare or combine FeatureDistribution")
+  private def checkMatch(fd: FeatureDistribution): Unit = {
+    def check[T](field: String, v1: T, v2: T): Unit = require(v1 == v2,
+      s"$field must match to compare or combine feature distributions: $v1 != $v2"
+    )
+    check("Name", name, fd.name)
+    check("Key", key, fd.key)
+  }
 
   /**
    * Get fill rate of feature
@@ -86,10 +101,19 @@ case class FeatureDistribution
    */
   def reduce(fd: FeatureDistribution): FeatureDistribution = {
     checkMatch(fd)
+    // should move this somewhere else
+    implicit val testStatsMonoid: Monoid[TextStats] = TextStats.monoid(RawFeatureFilter.MaxCardinality)
+    implicit val opMonoid = optionMonoid[TextStats]
+
     val combinedDist = distribution + fd.distribution
     // summary info can be empty or min max if hist is empty but should otherwise match so take the longest info
-    val combinedSummary = if (summaryInfo.length > fd.summaryInfo.length) summaryInfo else fd.summaryInfo
-    FeatureDistribution(name, key, count + fd.count, nulls + fd.nulls, combinedDist, combinedSummary)
+    val combinedSummaryInfo = if (summaryInfo.length > fd.summaryInfo.length) summaryInfo else fd.summaryInfo
+
+    val combinedMoments = moments + fd.moments
+    val combinedCard = cardEstimate + fd.cardEstimate
+
+    FeatureDistribution(name, key, count + fd.count, nulls + fd.nulls, combinedDist,
+      combinedSummaryInfo, combinedMoments, combinedCard, `type`)
   }
 
   /**
@@ -135,57 +159,142 @@ case class FeatureDistribution
   }
 
   override def toString(): String = {
-    s"Name=$name, Key=$key, Count=$count, Nulls=$nulls, Histogram=${distribution.toList}, BinInfo=${summaryInfo.toList}"
+    val valStr = Seq(
+      "type" -> `type`.toString,
+      "name" -> name,
+      "key" -> key,
+      "count" -> count.toString,
+      "nulls" -> nulls.toString,
+      "distribution" -> distribution.mkString("[", ",", "]"),
+      "summaryInfo" -> summaryInfo.mkString("[", ",", "]"),
+      "moments" -> moments.map(_.toString).getOrElse("")
+    ).map { case (n, v) => s"$n = $v" }.mkString(", ")
+
+    s"${getClass.getSimpleName}($valStr)"
   }
+
+  override def equals(that: Any): Boolean = that match {
+    case FeatureDistribution(`name`, `key`, `count`, `nulls`, d, s, m, c, `type`) =>
+      distribution.deep == d.deep && summaryInfo.deep == s.deep &&
+        moments == m && cardEstimate == c
+    case _ => false
+  }
+
+  override def hashCode(): Int = Objects.hashCode(name, key, count, nulls, distribution,
+    summaryInfo, moments, cardEstimate, `type`)
 }
 
-private[op] object FeatureDistribution {
+object FeatureDistribution {
 
   val MaxBins = 100000
 
   implicit val semigroup: Semigroup[FeatureDistribution] = new Semigroup[FeatureDistribution] {
-    override def plus(l: FeatureDistribution, r: FeatureDistribution) = l.reduce(r)
+    override def plus(l: FeatureDistribution, r: FeatureDistribution): FeatureDistribution = l.reduce(r)
+  }
+
+  val FeatureDistributionSerializer = FieldSerializer[FeatureDistribution](
+    FieldSerializer.ignore("cardEstimate")
+  )
+
+  implicit val formats: Formats = DefaultFormats +
+    EnumEntrySerializer.json4s[FeatureDistributionType](FeatureDistributionType) +
+    FeatureDistributionSerializer
+
+  /**
+   * Feature distributions to json
+   *
+   * @param fd feature distributions
+   * @return json array
+   */
+  def toJson(fd: Seq[FeatureDistribution]): String = Serialization.write[Seq[FeatureDistribution]](fd)
+
+  /**
+   * Feature distributions from json
+   *
+   * @param json feature distributions json
+   * @return feature distributions array
+   */
+  def fromJson(json: String): Try[Seq[FeatureDistribution]] = Try {
+    Serialization.read[Seq[FeatureDistribution]](json)
   }
 
   /**
    * Facilitates feature distribution retrieval from computed feature summaries
    *
-   * @param featureKey feature key
-   * @param summary feature summary
-   * @param value optional processed sequence
-   * @param bins number of histogram bins
+   * @param featureKey      feature key
+   * @param summary         feature summary
+   * @param value           optional processed sequence
+   * @param bins            number of histogram bins
    * @param textBinsFormula formula to compute the text features bin size.
    *                        Input arguments are [[Summary]] and number of bins to use in computing feature distributions
    *                        (histograms for numerics, hashes for strings). Output is the bins for the text features.
-   * @return a pair consisting of response and predictor feature distributions (in this order)
+   * @param `type`          feature distribution type: training or scoring
    * @return feature distribution given the provided information
    */
-  def apply(
+  private[op] def fromSummary(
     featureKey: FeatureKey,
     summary: Summary,
     value: Option[ProcessedSeq],
     bins: Int,
-    textBinsFormula: (Summary, Int) => Int
+    textBinsFormula: (Summary, Int) => Int,
+    `type`: FeatureDistributionType
   ): FeatureDistribution = {
-    val (nullCount, (summaryInfo, distribution)): (Int, (Array[Double], Array[Double])) =
-      value.map(seq => 0 -> histValues(seq, summary, bins, textBinsFormula))
-        .getOrElse(1 -> (Array(summary.min, summary.max, summary.sum, summary.count) -> new Array[Double](bins)))
+    val (name, key) = featureKey
+    val (nullCount, (summaryInfo, distribution)) =
+      value.map(seq => 0L -> histValues(seq, summary, bins, textBinsFormula))
+        .getOrElse(1L -> (Array(summary.min, summary.max, summary.sum, summary.count) -> new Array[Double](bins)))
+
+    val moments = value.map(momentsValues)
+    val cardEstimate = value.map(cardinalityValues)
 
     FeatureDistribution(
-      name = featureKey._1,
-      key = featureKey._2,
-      count = 1,
+      name = name,
+      key = key,
+      count = 1L,
       nulls = nullCount,
       summaryInfo = summaryInfo,
-      distribution = distribution)
+      distribution = distribution,
+      moments = moments,
+      cardEstimate = cardEstimate,
+      `type` = `type`
+    )
+  }
+
+  /**
+   * Function to calculate the first five central moments of numeric values, or length of tokens for text features
+   *
+   * @param values          values to calculate moments
+   * @return Moments object containing information about moments
+   */
+  private def momentsValues(values: ProcessedSeq): Moments = {
+    val population = values match {
+      case Left(seq) => seq.map(x => x.length.toDouble)
+      case Right(seq) => seq
+    }
+    MomentsGroup.sum(population.map(x => Moments(x)))
+  }
+
+  /**
+   * Function to track frequency of the first $(MaxCardinality) unique values
+   * (number for numeric features, token for text features)
+   *
+   * @param values          values to track distribution / frequency
+   * @return TextStats object containing a Map from a value to its frequency (histogram)
+   */
+  private def cardinalityValues(values: ProcessedSeq): TextStats = {
+    TextStats(countStringValues(values.left.getOrElse(values.right.get)))
+  }
+
+  private def countStringValues[T](seq: Seq[T]): Map[String, Int] = {
+    seq.groupBy(identity).map { case (k, valSeq) => k.toString -> valSeq.size }
   }
 
   /**
    * Function to put data into histogram of counts
    *
-   * @param values  values to bin
-   * @param summary summary info for feature (max, min, etc)
-   * @param bins    number of bins to produce
+   * @param values          values to bin
+   * @param summary         summary info for feature (max, min, etc)
+   * @param bins            number of bins to produce
    * @param textBinsFormula formula to compute the text features bin size.
    *                        Input arguments are [[Summary]] and number of bins to use in computing feature distributions
    *                        (histograms for numerics, hashes for strings). Output is the bins for the text features.

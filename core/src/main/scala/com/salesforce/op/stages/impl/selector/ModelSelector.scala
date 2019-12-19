@@ -33,25 +33,22 @@ package com.salesforce.op.stages.impl.selector
 import com.salesforce.op.UID
 import com.salesforce.op.evaluators.{EvaluationMetrics, _}
 import com.salesforce.op.features.types._
-import com.salesforce.op.readers.DataFrameFieldNames
 import com.salesforce.op.stages._
 import com.salesforce.op.stages.base.binary.OpTransformer2
 import com.salesforce.op.stages.impl.CheckIsResponseValues
-import com.salesforce.op.stages.impl.tuning._
+import com.salesforce.op.stages.impl.selector.ModelSelectorNames.ModelType
+import com.salesforce.op.stages.impl.tuning.{BestEstimator, _}
 import com.salesforce.op.stages.sparkwrappers.generic.SparkWrapperParams
 import com.salesforce.op.stages.sparkwrappers.specific.{OpPredictorWrapperModel, SparkModelConverter}
-import com.salesforce.op.utils.spark.RichDataset._
 import com.salesforce.op.utils.spark.RichMetadata._
+import com.salesforce.op.utils.spark.RichDataset._
 import com.salesforce.op.utils.spark.RichParamMap._
 import com.salesforce.op.utils.stages.FitStagesUtil._
-import com.salesforce.op.stages.impl.selector.ModelSelectorNames.{EstimatorType, ModelType}
 import org.apache.spark.ml.param._
-import org.apache.spark.ml.{Estimator, Model, PipelineStage, PredictionModel}
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.{Dataset, SparkSession}
+import org.apache.spark.ml.{Estimator, Model, PredictionModel}
+import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 
 import scala.reflect.runtime.universe._
-import scala.util.Try
 
 
 /**
@@ -94,11 +91,17 @@ E <: Estimator[_] with OpPipelineStage2[RealNN, OPVector, Prediction]]
   }
 
   @transient private[op] var bestEstimator: Option[BestEstimator[E]] = None
-  @transient private val modelsUse = models.map{case (e, p) =>
+  // TODO allow smart modification of these values
+  @transient private lazy val modelsUse = models.map{ case (e, p) =>
     val est = e.setOutputFeatureName(getOutputFeatureName)
     val par = if (p.isEmpty) Array(new ParamMap) else p
     est -> par
   }
+
+  lazy val labelColName: String = in1.name
+
+  override protected[op] def outputsColNamesMap: Map[String, String] =
+    Map(ModelSelectorNames.outputParamName -> getOutputFeatureName)
 
   /**
    * Find best estimator with validation on a workflow level. Executed when workflow level Cross Validation is on
@@ -106,25 +109,30 @@ E <: Estimator[_] with OpPipelineStage2[RealNN, OPVector, Prediction]]
    *
    * @param data                data to validate
    * @param dag                 dag done inside the Cross-validation/Train-validation split
-   * @param persistEveryKStages frequency of persisting the DAG's stages
    * @param spark               Spark Session
    * @return Updated Model Selector with best model along with best paramMap
    */
-  protected[op] def findBestEstimator(data: Dataset[_], dag: StagesDAG, persistEveryKStages: Int = 0)
-    (implicit spark: SparkSession): Unit = {
+  protected[op] def findBestEstimator(data: DataFrame, dag: Option[StagesDAG] = None)
+    (implicit spark: SparkSession): (BestEstimator[E], Option[SplitterSummary], DataFrame) = {
 
-    val theBestEstimator = validator.validate(modelInfo = modelsUse, dataset = data,
-      label = in1.name, features = in2.name, dag = Option(dag), splitter = splitter,
-      stratifyCondition = validator.isClassification
+    val PrevalidationVal(splitterSummary, dataOpt) = prepareForValidation(data, labelColName)
+    val dataUse = dataOpt.getOrElse(data)
+
+    val theBestEstimator = validator.validate(modelInfo = modelsUse, dataset = dataUse,
+      label = labelColName, features = in2.name, dag = dag, splitter = splitter
     )
 
     bestEstimator = Option(theBestEstimator)
+    (theBestEstimator, splitterSummary, dataUse)
   }
 
-  lazy val labelColName: String = in1.name
 
-  override protected[op] def outputsColNamesMap: Map[String, String] =
-    Map(ModelSelectorNames.outputParamName -> getOutputFeatureName)
+  private def prepareForValidation(data: DataFrame, labelColName: String): PrevalidationVal = {
+    splitter
+      .map(_.withLabelColumnName(labelColName).preValidationPrepare(data))
+      .getOrElse(PrevalidationVal(None, Option(data)))
+  }
+
 
   /**
    * Splits the data into training test and test set, balances the training set and selects the best model
@@ -136,45 +144,31 @@ E <: Estimator[_] with OpPipelineStage2[RealNN, OPVector, Prediction]]
   final override def fit(dataset: Dataset[_]): SelectedModel = {
 
     implicit val spark = dataset.sparkSession
+    setInputSchema(dataset.schema).transformSchema(dataset.schema)
+    require(!dataset.isEmpty, "Dataset cannot be empty")
+    val data = dataset.select(labelColName, in2.name)
+    val (BestEstimator(name, estimator, summary), splitterSummary, datasetWithID) = bestEstimator.map{ e =>
+      val PrevalidationVal(summary, dataOpt) = prepareForValidation(data, labelColName)
+      (e, summary, dataOpt.getOrElse(data))
+    }.getOrElse{ findBestEstimator(data.toDF()) }
 
-    val datasetWithID =
-      if (dataset.columns.contains(DataFrameFieldNames.KeyFieldName)) {
-        dataset.select(in1.name, in2.name, DataFrameFieldNames.KeyFieldName)
-      } else {
-        dataset.select(in1.name, in2.name)
-          .withColumn(ModelSelectorNames.idColName, monotonically_increasing_id())
-      }
-    require(!datasetWithID.isEmpty, "Dataset cannot be empty")
-
-    val ModelData(trainData, met) = splitter match {
-      case Some(spltr) => spltr.prepare(datasetWithID)
-      case None => ModelData(datasetWithID, None)
-    }
-
-    val BestEstimator(name, estimator, summary) = bestEstimator.getOrElse{
-      setInputSchema(dataset.schema).transformSchema(dataset.schema)
-      val best = validator
-        .validate(modelInfo = modelsUse, dataset = trainData, label = in1.name, features = in2.name)
-      bestEstimator = Some(best)
-      best
-    }
-
-    val bestModel = estimator.fit(trainData).asInstanceOf[M]
+    val preparedData = splitter.map(_.validationPrepare(datasetWithID)).getOrElse(datasetWithID)
+    val bestModel = estimator.fit(preparedData).asInstanceOf[M]
     val bestEst = bestModel.parent
     log.info(s"Selected model : ${bestEst.getClass.getSimpleName}")
     log.info(s"With parameters : ${bestEst.extractParamMap()}")
 
     // set input and output params
-    outputsColNamesMap.foreach { case (pname, pvalue) => bestModel.set(bestModel.getParam(pname), pvalue) }
+    outputsColNamesMap.foreach{ case (pname, pvalue) => bestModel.set(bestModel.getParam(pname), pvalue) }
 
     // get eval results for metadata
-    val trainingEval = evaluate(bestModel.transform(trainData))
+    val trainingEval = evaluate(bestModel.transform(preparedData))
 
     val metadataSummary = ModelSelectorSummary(
       validationType = ValidationType.fromValidator(validator),
       validationParameters = validator.getParams(),
-      dataPrepParameters = splitter.map(_.extractParamMap().getAsMap()).getOrElse(Map()),
-      dataPrepResults = met,
+      dataPrepParameters = splitter.map(_.extractParamMap().getAsMap()).getOrElse(Map.empty),
+      dataPrepResults = splitterSummary,
       evaluationMetric = validator.evaluator.name,
       problemType = ProblemType.fromEvalMetrics(trainingEval),
       bestModelUID = estimator.uid,
@@ -185,14 +179,12 @@ E <: Estimator[_] with OpPipelineStage2[RealNN, OPVector, Prediction]]
       holdoutEvaluation = None
     )
 
-    setMetadata(metadataSummary.toMetadata().toSummaryMetadata())
+    // We skip unsupported metadata values here so the model selector won't break
+    // when non standard model parameters are present in param maps
+    val meta = metadataSummary.toMetadata(skipUnsupported = true)
+    setMetadata(meta.toSummaryMetadata())
 
-    new SelectedModel(
-      bestModel.asInstanceOf[ModelType],
-      outputsColNamesMap,
-      uid,
-      operationName
-    )
+    new SelectedModel(bestModel.asInstanceOf[ModelType], outputsColNamesMap, uid = uid, operationName = operationName)
       .setInput(in1.asFeatureLike[RealNN], in2.asFeatureLike[OPVector])
       .setParent(this)
       .setMetadata(getMetadata())

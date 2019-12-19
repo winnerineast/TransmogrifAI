@@ -33,59 +33,81 @@ package com.salesforce.op.stages.impl.classification
 import com.salesforce.op.evaluators._
 import com.salesforce.op.stages.impl.ModelsToTry
 import com.salesforce.op.stages.impl.classification.{MultiClassClassificationModelsToTry => MTT}
-import com.salesforce.op.stages.impl.selector.{DefaultSelectorParams, ModelSelector}
+import com.salesforce.op.stages.impl.selector.{DefaultSelectorParams, ModelSelector, ModelSelectorFactory}
 import com.salesforce.op.stages.impl.tuning._
 import enumeratum.Enum
 import com.salesforce.op.stages.impl.selector.ModelSelectorNames.{EstimatorType, ModelType}
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.tuning.ParamGridBuilder
 
+import scala.concurrent.duration.Duration
+
 
 /**
  * A factory for Multi Classification Model Selector
  */
-case object MultiClassificationModelSelector {
+case object MultiClassificationModelSelector extends ModelSelectorFactory {
 
-  private[op] val modelNames: Seq[MultiClassClassificationModelsToTry] = Seq(MTT.OpLogisticRegression,
-    MTT.OpRandomForestClassifier) // OpDecisionTreeClassifier and OpNaiveBayes off by default
+  /**
+   * Default model types and model parameters for problem type
+   */
+  case object Defaults extends ModelDefaults[MultiClassClassificationModelsToTry] {
 
-  private val defaultModelsAndParams: Seq[(EstimatorType, Array[ParamMap])] = {
-    val lr = new OpLogisticRegression()
-    val lrParams = new ParamGridBuilder()
-      .addGrid(lr.fitIntercept, DefaultSelectorParams.FitIntercept)
-      .addGrid(lr.maxIter, DefaultSelectorParams.MaxIterLin)
-      .addGrid(lr.regParam, DefaultSelectorParams.Regularization)
-      .addGrid(lr.elasticNetParam, DefaultSelectorParams.ElasticNet)
-      .addGrid(lr.standardization, DefaultSelectorParams.Standardized)
-      .addGrid(lr.tol, DefaultSelectorParams.Tol)
-      .build()
+    /**
+     * Subset of models to use in model selector
+     *
+     * Note: [[OpDecisionTreeClassifier]], [[OpNaiveBayes]] and [[OpXGBoostClassifier]] are off by default
+     */
+    val modelTypesToUse: Seq[MultiClassClassificationModelsToTry] = Seq(
+      MTT.OpLogisticRegression, MTT.OpRandomForestClassifier
+    )
 
-    val rf = new OpRandomForestClassifier()
-    val rfParams = new ParamGridBuilder()
-      .addGrid(rf.maxDepth, DefaultSelectorParams.MaxDepth)
-      .addGrid(rf.impurity, DefaultSelectorParams.ImpurityClass)
-      .addGrid(rf.maxBins, DefaultSelectorParams.MaxBin)
-      .addGrid(rf.minInfoGain, DefaultSelectorParams.MinInfoGain)
-      .addGrid(rf.minInstancesPerNode, DefaultSelectorParams.MinInstancesPerNode)
-      .addGrid(rf.numTrees, DefaultSelectorParams.MaxTrees)
-      .addGrid(rf.subsamplingRate, DefaultSelectorParams.SubsampleRate)
-      .build()
+    /**
+     * Default models and parameters (must be a def) to use in model selector
+     *
+     * @return defaults for problem type
+     */
+    def modelsAndParams: Seq[(EstimatorType, ParamGridBuilder)] = {
+      val lr = new OpLogisticRegression()
+      val lrParams = new ParamGridBuilder()
+        .addGrid(lr.fitIntercept, DefaultSelectorParams.FitIntercept)
+        .addGrid(lr.maxIter, DefaultSelectorParams.MaxIterLin)
+        .addGrid(lr.regParam, DefaultSelectorParams.Regularization)
+        .addGrid(lr.elasticNetParam, DefaultSelectorParams.ElasticNet)
+        .addGrid(lr.standardization, DefaultSelectorParams.Standardized)
+        .addGrid(lr.tol, DefaultSelectorParams.Tol)
 
-    val nb = new OpNaiveBayes()
-    val nbParams = new ParamGridBuilder()
-      .addGrid(nb.smoothing, DefaultSelectorParams.NbSmoothing)
-      .build()
+      val rf = new OpRandomForestClassifier()
+      val rfParams = new ParamGridBuilder()
+        .addGrid(rf.maxDepth, DefaultSelectorParams.MaxDepth)
+        .addGrid(rf.impurity, DefaultSelectorParams.ImpurityClass)
+        .addGrid(rf.maxBins, DefaultSelectorParams.MaxBin)
+        .addGrid(rf.minInfoGain, DefaultSelectorParams.MinInfoGain)
+        .addGrid(rf.minInstancesPerNode, DefaultSelectorParams.MinInstancesPerNode)
+        .addGrid(rf.numTrees, DefaultSelectorParams.MaxTrees)
+        .addGrid(rf.subsamplingRate, DefaultSelectorParams.SubsampleRate)
 
-    val dt = new OpDecisionTreeClassifier()
-    val dtParams = new ParamGridBuilder()
-      .addGrid(dt.maxDepth, DefaultSelectorParams.MaxDepth)
-      .addGrid(dt.impurity, DefaultSelectorParams.ImpurityClass)
-      .addGrid(dt.maxBins, DefaultSelectorParams.MaxBin)
-      .addGrid(dt.minInfoGain, DefaultSelectorParams.MinInfoGain)
-      .addGrid(dt.minInstancesPerNode, DefaultSelectorParams.MinInstancesPerNode)
-      .build()
+      val nb = new OpNaiveBayes()
+      val nbParams = new ParamGridBuilder()
+        .addGrid(nb.smoothing, DefaultSelectorParams.NbSmoothing)
 
-    Seq(lr -> lrParams, rf -> rfParams, nb -> nbParams, dt -> dtParams)
+      val dt = new OpDecisionTreeClassifier()
+      val dtParams = new ParamGridBuilder()
+        .addGrid(dt.maxDepth, DefaultSelectorParams.MaxDepth)
+        .addGrid(dt.impurity, DefaultSelectorParams.ImpurityClass)
+        .addGrid(dt.maxBins, DefaultSelectorParams.MaxBin)
+        .addGrid(dt.minInfoGain, DefaultSelectorParams.MinInfoGain)
+        .addGrid(dt.minInstancesPerNode, DefaultSelectorParams.MinInstancesPerNode)
+
+      val xgb = new OpXGBoostClassifier()
+      val xgbParams = new ParamGridBuilder()
+        .addGrid(xgb.numRound, DefaultSelectorParams.NumRound)
+        .addGrid(xgb.eta, DefaultSelectorParams.Eta)
+        .addGrid(xgb.maxDepth, DefaultSelectorParams.MaxDepth)
+        .addGrid(xgb.minChildWeight, DefaultSelectorParams.MinChildWeight)
+
+      Seq(lr -> lrParams, rf -> rfParams, nb -> nbParams, dt -> dtParams, xgb -> xgbParams)
+    }
   }
 
   /**
@@ -113,25 +135,33 @@ case object MultiClassificationModelSelector {
    *                            for model selection Seq[(EstimatorType, Array[ParamMap])] where Estimator type must be
    *                            an Estimator that takes in a label (RealNN) and features (OPVector) and returns a
    *                            prediction (Prediction)
+   * @param maxWait             maximum allowable time to wait for a model to finish running (default is 1 day)
    * @return MultiClassification Model Selector with a Cross Validation
    */
   def withCrossValidation(
     splitter: Option[DataCutter] = Option(DataCutter()),
     numFolds: Int = ValidatorParamDefaults.NumFolds,
-    validationMetric: OpMultiClassificationEvaluatorBase[_] = Evaluators.MultiClassification.error(),
+    validationMetric: OpMultiClassificationEvaluatorBase[_ <: EvaluationMetrics] =
+    Evaluators.MultiClassification.error(),
     trainTestEvaluators: Seq[OpMultiClassificationEvaluatorBase[_ <: EvaluationMetrics]] = Seq.empty,
     seed: Long = ValidatorParamDefaults.Seed,
     stratify: Boolean = ValidatorParamDefaults.Stratify,
     parallelism: Int = ValidatorParamDefaults.Parallelism,
-    modelTypesToUse: Seq[MultiClassClassificationModelsToTry] = modelNames,
-    modelsAndParameters: Seq[(EstimatorType, Array[ParamMap])] = defaultModelsAndParams
+    modelTypesToUse: Seq[MultiClassClassificationModelsToTry] = Defaults.modelTypesToUse,
+    modelsAndParameters: Seq[(EstimatorType, Array[ParamMap])] = Seq.empty,
+    maxWait: Duration = ValidatorParamDefaults.MaxWait
   ): ModelSelector[ModelType, EstimatorType] = {
     val cv = new OpCrossValidation[ModelType, EstimatorType](
-      numFolds = numFolds, seed = seed, validationMetric, stratify = stratify, parallelism = parallelism
+      numFolds = numFolds, seed = seed, evaluator = validationMetric, stratify = stratify, parallelism = parallelism,
+      maxWait = maxWait
     )
-    selector(cv, splitter = splitter,
+    selector(cv,
+      splitter = splitter,
       trainTestEvaluators = Seq(new OpMultiClassificationEvaluator) ++ trainTestEvaluators,
-      modelTypesToUse = modelTypesToUse, modelsAndParameters = modelsAndParameters)
+      modelTypesToUse = modelTypesToUse,
+      modelsAndParameters = modelsAndParameters,
+      modelDefaults = Defaults
+    )
   }
 
   /**
@@ -154,47 +184,35 @@ case object MultiClassificationModelSelector {
    *                            for model selection Seq[(EstimatorType, Array[ParamMap])] where Estimator type must be
    *                            an Estimator that takes in a label (RealNN) and features (OPVector) and returns a
    *                            prediction (Prediction)
+   * @param maxWait             maximum allowable time to wait for a model to finish running (default is 1 day)
    * @return MultiClassification Model Selector with a Train Validation Split
    */
   def withTrainValidationSplit(
     splitter: Option[DataCutter] = Option(DataCutter()),
     trainRatio: Double = ValidatorParamDefaults.TrainRatio,
-    validationMetric: OpMultiClassificationEvaluatorBase[_] = Evaluators.MultiClassification.error(),
+    validationMetric: OpMultiClassificationEvaluatorBase[_ <: EvaluationMetrics] =
+    Evaluators.MultiClassification.error(),
     trainTestEvaluators: Seq[OpMultiClassificationEvaluatorBase[_ <: EvaluationMetrics]] = Seq.empty,
     seed: Long = ValidatorParamDefaults.Seed,
     stratify: Boolean = ValidatorParamDefaults.Stratify,
     parallelism: Int = ValidatorParamDefaults.Parallelism,
-    modelTypesToUse: Seq[MultiClassClassificationModelsToTry] = modelNames,
-    modelsAndParameters: Seq[(EstimatorType, Array[ParamMap])] = defaultModelsAndParams
+    modelTypesToUse: Seq[MultiClassClassificationModelsToTry] = Defaults.modelTypesToUse,
+    modelsAndParameters: Seq[(EstimatorType, Array[ParamMap])] = Seq.empty,
+    maxWait: Duration = ValidatorParamDefaults.MaxWait
   ): ModelSelector[ModelType, EstimatorType] = {
     val ts = new OpTrainValidationSplit[ModelType, EstimatorType](
       trainRatio = trainRatio, seed = seed, validationMetric, stratify = stratify, parallelism = parallelism
     )
-    selector(ts, splitter = splitter,
-      trainTestEvaluators = Seq(new OpMultiClassificationEvaluator) ++ trainTestEvaluators,
-      modelTypesToUse = modelTypesToUse, modelsAndParameters = modelsAndParameters)
-  }
-
-  private def selector(
-    validator: OpValidator[ModelType, EstimatorType],
-    splitter: Option[DataCutter],
-    trainTestEvaluators: Seq[OpMultiClassificationEvaluatorBase[_ <: EvaluationMetrics]],
-    modelTypesToUse: Seq[MultiClassClassificationModelsToTry],
-    modelsAndParameters: Seq[(EstimatorType, Array[ParamMap])]
-  ): ModelSelector[ModelType, EstimatorType] = {
-    val modelStrings = modelTypesToUse.map(_.entryName)
-    val modelsToUse =
-      if (modelsAndParameters == defaultModelsAndParams || modelTypesToUse != modelNames) modelsAndParameters
-        .filter{ case (e, p) => modelStrings.contains(e.getClass.getSimpleName) }
-      else modelsAndParameters
-    new ModelSelector(
-      validator = validator,
+    selector(ts,
       splitter = splitter,
-      models = modelsToUse,
-      evaluators = trainTestEvaluators
+      trainTestEvaluators = Seq(new OpMultiClassificationEvaluator) ++ trainTestEvaluators,
+      modelTypesToUse = modelTypesToUse,
+      modelsAndParameters = modelsAndParameters,
+      modelDefaults = Defaults
     )
   }
 }
+
 /**
  * Enumeration of possible classification models in Model Selector
  */
@@ -206,6 +224,7 @@ object MultiClassClassificationModelsToTry extends Enum[MultiClassClassification
   case object OpRandomForestClassifier extends MultiClassClassificationModelsToTry
   case object OpDecisionTreeClassifier extends MultiClassClassificationModelsToTry
   case object OpNaiveBayes extends MultiClassClassificationModelsToTry
+  case object OpXGBoostClassifier extends MultiClassClassificationModelsToTry
   case class Custom(private val modeType: Class[_ <: EstimatorType]) extends MultiClassClassificationModelsToTry {
     override val entryName: String = modeType.getSimpleName
   }

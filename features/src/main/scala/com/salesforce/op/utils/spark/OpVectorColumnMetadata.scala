@@ -74,12 +74,12 @@ case class OpVectorColumnMetadata // TODO make separate case classes extending t
   index: Int = 0
 ) extends JsonLike {
 
-  assert(parentFeatureName.nonEmpty, "must provide parent feature name")
-  assert(parentFeatureType.nonEmpty, "must provide parent type name")
-  assert(parentFeatureName.length == parentFeatureType.length,
+  require(parentFeatureName.nonEmpty, "must provide parent feature name")
+  require(parentFeatureType.nonEmpty, "must provide parent type name")
+  require(parentFeatureName.length == parentFeatureType.length,
     s"must provide both type and name for every parent feature," +
       s" names: $parentFeatureName and types: $parentFeatureType do not have the same length")
-  assert(indicatorValue.isEmpty || descriptorValue.isEmpty, "cannot have both indicatorValue and descriptorValue")
+  require(indicatorValue.isEmpty || descriptorValue.isEmpty, "cannot have both indicatorValue and descriptorValue")
 
   /**
    * Convert this column into Spark metadata.
@@ -100,10 +100,16 @@ case class OpVectorColumnMetadata // TODO make separate case classes extending t
   }
 
   /**
-   * Is this column corresponds to a null-encoded categorical (maybe also other types - investigating!)
-   * @return true if this column corresponds to a null-encoded categorical (maybe also other types - investigating!)
+   * Is this column corresponds to a null-encoded value
+   * @return true if this column corresponds to a null-encoded value
    */
   def isNullIndicator: Boolean = indicatorValue.contains(OpVectorColumnMetadata.NullString)
+
+  /**
+   * Is this column corresponds the other category of a one hot encoded categorical
+   * @return true if this column corresponds to the other category of a one hot encoded categorical
+   */
+  def isOtherIndicator: Boolean = indicatorValue.contains(OpVectorColumnMetadata.OtherString)
 
   /**
    * Convert this column into Spark metadata.
@@ -145,6 +151,12 @@ case class OpVectorColumnMetadata // TODO make separate case classes extending t
     if (hasParentOfSubType[OPMap[_]]) parentFeatureName.map(p => grouping.map(p + "_" + _).getOrElse(p))
     else parentFeatureName
 
+  /**
+   * Get the feature grouping qualified by the parent feature name
+   * @return Optional string of feature grouping
+   */
+  def featureGroup(): Option[String] = grouping.map(g => s"${parentFeatureName.mkString("_")}_$g")
+
 }
 
 object OpVectorColumnMetadata {
@@ -155,6 +167,8 @@ object OpVectorColumnMetadata {
   val DescriptorValueKey = "descriptor_value"
   val IndicesKey = "indices"
   val NullString = "NullIndicatorValue"
+  val TextLenString = "TextLenValue"
+  val OtherString = "OTHER"
 
   /**
    * Alternate constructor for OpVectorColumnMetadata cannot be in class because causes serialization issues

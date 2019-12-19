@@ -31,9 +31,10 @@
 package com.salesforce.op
 
 import com.salesforce.op.features.OPFeature
-import com.salesforce.op.filters.{FeatureDistribution, RawFeatureFilter, Summary}
+import com.salesforce.op.filters.{FeatureDistribution, FilteredRawData, RawFeatureFilter, Summary}
 import com.salesforce.op.readers.Reader
 import com.salesforce.op.stages.OPStage
+import com.salesforce.op.stages.impl.feature.TimePeriod
 import com.salesforce.op.stages.impl.preparators.CorrelationType
 import com.salesforce.op.stages.impl.selector.ModelSelector
 import com.salesforce.op.utils.reflection.ReflectionUtils
@@ -128,13 +129,13 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
       initialStages.foreach { stg =>
         val inFeatures = stg.getInputFeatures()
         val blacklistRemoved = inFeatures
-          .filterNot{ f => allBlacklisted.exists(bl => bl.sameOrigin(f)) }
-          .map{ f => if (f.isRaw) f.withDistributions(distributions.collect{ case d if d.name == f.name => d }) else f }
+          .filterNot { f => allBlacklisted.exists(bl => bl.sameOrigin(f)) }
+          .map { f =>
+            if (f.isRaw) f.withDistributions(distributions.collect { case d if d.name == f.name => d }) else f
+          }
         val inputsChanged = blacklistRemoved.map{ f => allUpdated.find(u => u.sameOrigin(f)).getOrElse(f) }
         val oldOutput = stg.getOutput()
-        Try{
-          stg.setInputFeatureArray(inputsChanged).setOutputFeatureName(oldOutput.name).getOutput()
-        } match {
+        Try(stg.setInputFeatureArray(inputsChanged).setOutputFeatureName(oldOutput.name).getOutput()) match {
           case Success(out) => allUpdated += out
           case Failure(e) =>
             if (initialResultFeatures.contains(oldOutput)) throw new RuntimeException(
@@ -220,23 +221,27 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
    */
   protected def generateRawData()(implicit spark: SparkSession): DataFrame = {
     (reader, rawFeatureFilter) match {
-      case (None, None) => throw new IllegalArgumentException("Data reader must be set either directly on the" +
-        " workflow or through the RawFeatureFilter")
+      case (None, None) => throw new IllegalArgumentException(
+        "Data reader must be set either directly on the workflow or through the RawFeatureFilter")
       case (Some(r), None) =>
         checkReadersAndFeatures()
         r.generateDataFrame(rawFeatures, parameters).persist()
       case (rd, Some(rf)) =>
         rd match {
           case None => setReader(rf.trainingReader)
-          case Some(r) => if (r != rf.trainingReader) log.warn("Workflow data reader and RawFeatureFilter training" +
-            " reader do not match! The RawFeatureFilter training reader will be used to generate the data for training")
+          case Some(r) => if (r != rf.trainingReader) log.warn(
+            "Workflow data reader and RawFeatureFilter training reader do not match! " +
+              "The RawFeatureFilter training reader will be used to generate the data for training")
         }
         checkReadersAndFeatures()
-        val filteredRawData = rf.generateFilteredRaw(rawFeatures, parameters)
-        setRawFeatureDistributions(filteredRawData.featureDistributions.toArray)
-        setBlacklist(filteredRawData.featuresToDrop, filteredRawData.featureDistributions)
-        setBlacklistMapKeys(filteredRawData.mapKeysToDrop)
-        filteredRawData.cleanedData
+
+        val FilteredRawData(cleanedData, featuresToDrop, mapKeysToDrop, rawFeatureFilterResults) =
+          rf.generateFilteredRaw(rawFeatures, parameters)
+
+        setRawFeatureFilterResults(rawFeatureFilterResults)
+        setBlacklist(featuresToDrop, rawFeatureFilterResults.rawFeatureDistributions)
+        setBlacklistMapKeys(mapKeysToDrop)
+        cleanedData
     }
   }
 
@@ -330,7 +335,6 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
     val (fittedStages, newResultFeatures) =
       if (stages.exists(_.isInstanceOf[Estimator[_]])) {
         val rawData = generateRawData()
-
         // Update features with fitted stages
         val fittedStgs = fitStages(data = rawData, stagesToFit = stages, persistEveryKStages)
         val newResultFtrs = resultFeatures.map(_.copyWithNewStages(fittedStgs))
@@ -346,7 +350,7 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
         .setParameters(getParameters())
         .setBlacklist(getBlacklist())
         .setBlacklistMapKeys(getBlacklistMapKeys())
-        .setRawFeatureDistributions(getRawFeatureDistributions())
+        .setRawFeatureFilterResults(getRawFeatureFilterResults())
 
     reader.map(model.setReader).getOrElse(model)
   }
@@ -418,7 +422,7 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
           log.info("Estimate best Model with CV/TS. Stages included in CV are: {}, {}",
             during.flatMap(_.map(_._1.stageName)).mkString(", "), modelSelector.uid: Any
           )
-          modelSelector.findBestEstimator(trainFixed, during, persistEveryKStages)
+          modelSelector.findBestEstimator(trainFixed, Option(during))
           val remainingDAG: StagesDAG = (during :+ (Array(modelSelector -> distance): Layer)) ++ after
 
           log.info("Applying DAG after CV/TS. Stages: {}", remainingDAG.flatMap(_.map(_._1.stageName)).mkString(", "))
@@ -450,7 +454,8 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
    *         needed to generate the features not included in the fitted model
    */
   def withModelStages(model: OpWorkflowModel): this.type = {
-    val newResultFeatures = (resultFeatures ++ model.getResultFeatures()).map(_.copyWithNewStages(model.stages))
+    val newResultFeatures =
+      (resultFeatures ++ model.getResultFeatures()).map(_.copyWithNewStages(model.getStages()))
     setResultFeatures(newResultFeatures: _*)
   }
 
@@ -460,7 +465,7 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
    * @param path to the trained workflow model
    * @return workflow model
    */
-  def loadModel(path: String): OpWorkflowModel = new OpWorkflowModelReader(this).load(path)
+  def loadModel(path: String): OpWorkflowModel = new OpWorkflowModelReader(Some(this)).load(path)
 
   /**
    * Returns a dataframe containing all the columns generated up to and including the feature input
@@ -488,24 +493,29 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
    * Add a raw features filter to the workflow to look at fill rates and distributions of raw features and exclude
    * features that do not meet specifications from modeling DAG
    *
-   * @param trainingReader    training reader to use in filter if not supplied will fall back to reader specified for
-   *                          workflow (note that this reader will take precedence over readers directly input to the
-   *                          workflow if both are supplied)
-   * @param scoringReader     scoring reader to use in filter if not supplied will do the checks possible with only
-   *                          training data available
-   * @param bins              number of bins to use in estimating feature distributions
-   * @param minFillRate       minimum non-null fraction of instances that a feature should contain
-   * @param maxFillDifference maximum absolute difference in fill rate between scoring and training data for a feature
-   * @param maxFillRatioDiff  maximum difference in fill ratio (symmetric) between scoring and training data for
-   *                          a feature
-   * @param maxJSDivergence   maximum Jensen-Shannon divergence between the training and scoring distributions
-   *                          for a feature
-   * @param protectedFeatures list of features that should never be removed (features that are used to create them will
-   *                          also be protected)
-   * @param textBinsFormula   formula to compute the text features bin size.
-   *                          Input arguments are [[Summary]] and number of bins to use in computing
-   *                          feature distributions (histograms for numerics, hashes for strings).
-   *                          Output is the bins for the text features.
+   * @param trainingReader     training reader to use in filter if not supplied will fall back to reader specified for
+   *                           workflow (note that this reader will take precedence over readers directly input to the
+   *                           workflow if both are supplied)
+   * @param scoringReader      scoring reader to use in filter if not supplied will do the checks possible with only
+   *                           training data available
+   * @param bins               number of bins to use in estimating feature distributions
+   * @param minFillRate        minimum non-null fraction of instances that a feature should contain
+   * @param maxFillDifference  maximum absolute difference in fill rate between scoring and training data for a feature
+   * @param maxFillRatioDiff   maximum difference in fill ratio (symmetric) between scoring and training data for
+   *                           a feature
+   * @param maxJSDivergence    maximum Jensen-Shannon divergence between the training and scoring distributions
+   *                           for a feature
+   * @param protectedFeatures  list of features that should never be removed (features that are used to create them will
+   *                           also be protected)
+   * @param protectedJSFeatures features that are protected from removal by JS divergence check
+   * @param textBinsFormula    formula to compute the text features bin size.
+   *                           Input arguments are [[Summary]] and number of bins to use in computing
+   *                           feature distributions (histograms for numerics, hashes for strings).
+   *                           Output is the bins for the text features.
+   * @param timePeriod         Time period used to apply circulate date transformation for date features, if not
+   *                           specified will use numeric feature transformation
+   * @param minScoringRows     Minimum row threshold for scoring set comparisons to be used in checks. If the scoring
+   *                           set size is below this threshold, then only training data checks will be used
    * @tparam T Type of the data read in
    */
   @Experimental
@@ -521,16 +531,20 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
     maxCorrelation: Double = 0.95,
     correlationType: CorrelationType = CorrelationType.Pearson,
     protectedFeatures: Array[OPFeature] = Array.empty,
-    textBinsFormula: (Summary, Int) => Int = RawFeatureFilter.textBinsFormula
+    protectedJSFeatures: Array[OPFeature] = Array.empty,
+    textBinsFormula: (Summary, Int) => Int = RawFeatureFilter.textBinsFormula,
+    timePeriod: Option[TimePeriod] = None,
+    minScoringRows: Int = RawFeatureFilter.minScoringRowsDefault
   ): this.type = {
     val training = trainingReader.orElse(reader).map(_.asInstanceOf[Reader[T]])
     require(training.nonEmpty, "Reader for training data must be provided either in withRawFeatureFilter or directly" +
       "as the reader for the workflow")
     val protectedRawFeatures = protectedFeatures.flatMap(_.rawFeatures).map(_.name).toSet
+    val protectedRawJSFeatures = protectedJSFeatures.flatMap(_.rawFeatures).map(_.name).toSet
     rawFeatureFilter = Option {
       new RawFeatureFilter(
         trainingReader = training.get,
-        scoreReader = scoringReader,
+        scoringReader = scoringReader,
         bins = bins,
         minFill = minFillRate,
         maxFillDifference = maxFillDifference,
@@ -539,8 +553,10 @@ class OpWorkflow(val uid: String = UID[OpWorkflow]) extends OpWorkflowCore {
         maxCorrelation = maxCorrelation,
         correlationType = correlationType,
         protectedFeatures = protectedRawFeatures,
-        textBinsFormula = textBinsFormula
-      )
+        jsDivergenceProtectedFeatures = protectedRawJSFeatures,
+        textBinsFormula = textBinsFormula,
+        timePeriod = timePeriod,
+        minScoringRows = minScoringRows)
     }
     this
   }

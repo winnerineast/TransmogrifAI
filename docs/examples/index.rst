@@ -12,4 +12,6 @@ Examples
   Time-Series-Aggregates-and-Joins
   Conditional-Aggregation
   Running-from-Spark-Shell
+  Running-from-Jupyter-Notebook
   Bootstrap-Your-First-Project
+  Community-Projects

@@ -20,7 +20,7 @@
 
 package com.salesforce.op.stages.impl.tuning
 
-import com.salesforce.op.evaluators.OpEvaluatorBase
+import com.salesforce.op.evaluators.{EvaluationMetrics, OpEvaluatorBase}
 import com.salesforce.op.stages.impl.selector.ModelSelectorNames
 import com.salesforce.op.utils.stages.FitStagesUtil._
 import org.apache.spark.ml.param.ParamMap
@@ -29,15 +29,17 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.Duration
 
 
 private[op] class OpTrainValidationSplit[M <: Model[_], E <: Estimator[_]]
 (
   val trainRatio: Double = ValidatorParamDefaults.TrainRatio,
   val seed: Long = ValidatorParamDefaults.Seed,
-  val evaluator: OpEvaluatorBase[_],
+  val evaluator: OpEvaluatorBase[_ <: EvaluationMetrics],
   val stratify: Boolean = ValidatorParamDefaults.Stratify,
-  val parallelism: Int = ValidatorParamDefaults.Parallelism
+  val parallelism: Int = ValidatorParamDefaults.Parallelism,
+  val maxWait: Duration = ValidatorParamDefaults.MaxWait
 ) extends OpValidator[M, E] {
 
   val validationName: String = ModelSelectorNames.TrainValSplitResults
@@ -77,7 +79,10 @@ private[op] class OpTrainValidationSplit[M <: Model[_], E <: Estimator[_]]
         label = label,
         features = features,
         splitter = splitter
-      )).getOrElse(trainingDataset, validationDataset)
+      )).getOrElse {
+        splitter.map(s => (s.validationPrepare(trainingDataset), validationDataset))
+          .getOrElse((trainingDataset, validationDataset))
+      }
     }
     implicit val ec: ExecutionContext = makeExecutionContext()
     val modelSummaries = getSummary(modelInfo, label = label, features = features, train = newTrain, test = newTest)
@@ -91,16 +96,16 @@ private[op] class OpTrainValidationSplit[M <: Model[_], E <: Estimator[_]]
    * Creates Train Validation Splits For TS
    *
    * @param stratifyCondition condition to do stratify ts
-   * @param dataset dataset to split
-   * @param label name of label in dataset
-   * @param splitter  used to estimate splitter params prior to ts
+   * @param dataset           dataset to split
+   * @param label             name of label in dataset
+   * @param splitter          used to estimate splitter params prior to ts
    * @return Array[(Train, Test)]
    */
   private[op] override def createTrainValidationSplits[T](
     stratifyCondition: Boolean,
     dataset: Dataset[T],
     label: String,
-    splitter: Option[Splitter] = None
+    splitter: Option[Splitter]
   ): Array[(RDD[Row], RDD[Row])] = {
 
     // get param that stores the label column

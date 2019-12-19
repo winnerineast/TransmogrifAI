@@ -5,28 +5,27 @@
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
+ * * Redistributions of source code must retain the above copyright notice, this
+ *   list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
+ * * Redistributions in binary form must reproduce the above copyright notice,
+ *   this list of conditions and the following disclaimer in the documentation
+ *   and/or other materials provided with the distribution.
  *
- * 3. Neither the name of Salesforce.com nor the names of its contributors may
- * be used to endorse or promote products derived from this software without
- * specific prior written permission.
+ * * Neither the name of the copyright holder nor the names of its
+ *   contributors may be used to endorse or promote products derived from
+ *   this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 package com.salesforce.hw
@@ -37,7 +36,7 @@ import com.salesforce.op.features.FeatureBuilder
 import com.salesforce.op.features.types._
 import com.salesforce.op.readers.DataReaders
 import com.salesforce.op.stages.impl.classification.BinaryClassificationModelSelector
-import com.salesforce.op.stages.impl.classification.ClassificationModelsToTry._
+import com.salesforce.op.stages.impl.classification.BinaryClassificationModelsToTry._
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 
@@ -91,8 +90,8 @@ object OpTitanicSimple {
     println(s"Using user-supplied CSV file path: $csvFilePath")
 
     // Set up a SparkSession as normal
-    val conf = new SparkConf().setAppName(this.getClass.getSimpleName.stripSuffix("$"))
-    implicit val spark = SparkSession.builder.config(conf).getOrCreate()
+    implicit val spark = SparkSession.builder.config(new SparkConf()).getOrCreate()
+    import spark.implicits._ // Needed for Encoders for the Passenger case class
 
     ////////////////////////////////////////////////////////////////////////////////
     // RAW FEATURE DEFINITIONS
@@ -126,53 +125,53 @@ object OpTitanicSimple {
     val passengerFeatures = Seq(
       pClass, name, age, sibSp, parCh, ticket,
       cabin, embarked, familySize, estimatedCostOfTickets,
-      pivotedSex, ageGroup
+      pivotedSex, ageGroup, normedAge
     ).transmogrify()
 
     // Optionally check the features with a sanity checker
-    val sanityCheck = true
-    val finalFeatures = if (sanityCheck) survived.sanityCheck(passengerFeatures) else passengerFeatures
+    val checkedFeatures = survived.sanityCheck(passengerFeatures, removeBadFeatures = true)
 
     // Define the model we want to use (here a simple logistic regression) and get the resulting output
-    val (prediction, rawPrediction, prob) =
-      BinaryClassificationModelSelector.withTrainValidationSplit()
-        .setModelsToTry(LogisticRegression)
-        .setInput(survived, finalFeatures).getOutput()
+    val prediction = BinaryClassificationModelSelector.withTrainValidationSplit(
+      modelTypesToUse = Seq(OpLogisticRegression)
+    ).setInput(survived, checkedFeatures).getOutput()
 
-    val evaluator = Evaluators.BinaryClassification()
-      .setLabelCol(survived)
-      .setRawPredictionCol(rawPrediction)
-      .setPredictionCol(prediction)
-      .setProbabilityCol(prob)
+    val evaluator = Evaluators.BinaryClassification().setLabelCol(survived).setPredictionCol(prediction)
 
     ////////////////////////////////////////////////////////////////////////////////
     // WORKFLOW
     /////////////////////////////////////////////////////////////////////////////////
 
-    import spark.implicits._ // Needed for Encoders for the Passenger case class
     // Define a way to read data into our Passenger class from our CSV file
-    val trainDataReader = DataReaders.Simple.csvCase[Passenger](
-      path = Option(csvFilePath),
-      key = _.id.toString
-    )
+    val dataReader = DataReaders.Simple.csvCase[Passenger](path = Option(csvFilePath), key = _.id.toString)
 
     // Define a new workflow and attach our data reader
-    val workflow =
-      new OpWorkflow()
-        .setResultFeatures(survived, rawPrediction, prob, prediction)
-        .setReader(trainDataReader)
+    val workflow = new OpWorkflow().setResultFeatures(survived, prediction).setReader(dataReader)
 
     // Fit the workflow to the data
-    val fittedWorkflow = workflow.train()
-    println(s"Summary: ${fittedWorkflow.summary()}")
+    val model = workflow.train()
+    println(s"Model summary:\n${model.summaryPretty()}")
+
+    // Extract information (i.e. feature importance) via model insights
+    val modelInsights = model.modelInsights(prediction)
+    val modelFeatures = modelInsights.features.flatMap( feature => feature.derivedFeatures)
+    val featureContributions = modelFeatures.map( feature => (feature.derivedFeatureName,
+      feature.contribution.map( contribution => math.abs(contribution))
+        .foldLeft(0.0) { (max, contribution) => math.max(max, contribution)}))
+    val sortedContributions = featureContributions.sortBy( contribution => -contribution._2)
+
+    val topNum = math.min(20, sortedContributions.size)
+    println(s"Top $topNum feature contributions:")
+    sortedContributions.take(topNum).foreach( featureInfo => println(s"${featureInfo._1}: ${featureInfo._2}"))
+
 
     // Manifest the result features of the workflow
     println("Scoring the model")
-    val (dataframe, metrics) = fittedWorkflow.scoreAndEvaluate(evaluator = evaluator)
+    val (scores, metrics) = model.scoreAndEvaluate(evaluator = evaluator)
 
-    println("Transformed dataframe columns:")
-    dataframe.columns.foreach(println)
-    println("Metrics:")
-    println(metrics)
+    println("Metrics:\n" + metrics)
+
+    // Stop Spark gracefully
+    spark.stop()
   }
 }

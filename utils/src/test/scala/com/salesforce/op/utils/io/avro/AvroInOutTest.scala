@@ -47,7 +47,7 @@ class AvroInOutTest extends FlatSpec with TestSparkContext {
   val avroSchemaPath = s"$testDataDir/PassengerDataAll.avsc"
   val avroFilePath = s"$testDataDir/PassengerDataAll.avro"
   val avroFileRecordCount = 891
-  val hdfs: FileSystem = FileSystem.get(spark.sparkContext.hadoopConfiguration)
+  val hdfs: FileSystem = FileSystem.get(sc.hadoopConfiguration)
   lazy val avroTemp: String = tempDir + "/avro-inout-test"
 
   Spec(AvroInOut.getClass) should "creates RDD from an avro file" in {
@@ -68,7 +68,7 @@ class AvroInOutTest extends FlatSpec with TestSparkContext {
 
   it should "throw an error if passed in avro files are invalid" in {
     val error = intercept[IllegalArgumentException](readPathSeq("badfile/path1,badfile/path2"))
-    error.getMessage shouldBe "No valid directory found in the list of paths <<badfile/path1,badfile/path2>>"
+    error.getMessage shouldBe "No valid directory found in path 'badfile/path1,badfile/path2'"
   }
 
   it should "creates Some(RDD) from an avro file" in {

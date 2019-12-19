@@ -35,9 +35,9 @@ import com.salesforce.op.features.FeatureSparkTypes
 import com.salesforce.op.features.types.FeatureType
 import com.salesforce.op.stages.{OpPipelineStage2N, OpTransformer}
 import org.apache.spark.ml.Transformer
+import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset}
 import org.apache.spark.util.ClosureUtils
-import org.apache.spark.sql.functions._
 
 import scala.reflect.runtime.universe.TypeTag
 import scala.util.Try
@@ -76,7 +76,7 @@ trait OpTransformer2N[I1 <: FeatureType, I2 <: FeatureType, O <: FeatureType]
    * @return a new dataset containing a column for the transformed feature
    */
   override def transform(dataset: Dataset[_]): DataFrame = {
-    assert(getTransientFeatures.size > 1, "Inputs cannot be empty")
+    require(getTransientFeatures.size > 1, "Inputs cannot be empty")
     val newSchema = setInputSchema(dataset.schema).transformSchema(dataset.schema)
     val functionUDF = FeatureSparkTypes.udf2N[I1, I2, O](transformFn)
     val meta = newSchema(getOutputFeatureName).metadata

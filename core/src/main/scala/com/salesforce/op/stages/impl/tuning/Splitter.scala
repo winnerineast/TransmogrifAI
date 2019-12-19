@@ -30,32 +30,24 @@
 
 package com.salesforce.op.stages.impl.tuning
 
-import org.apache.spark.ml.param._
-import org.apache.spark.sql.{Dataset, Row}
 import com.salesforce.op.stages.impl.MetadataLike
 import com.salesforce.op.stages.impl.selector.ModelSelectorNames
-import com.salesforce.op.utils.reflection.ReflectionUtils
-import org.apache.spark.sql.types.{Metadata, MetadataBuilder}
-import com.salesforce.op.utils.spark.RichMetadata._
+import org.apache.spark.ml.param._
 import org.apache.spark.sql.types.Metadata
+import org.apache.spark.sql.{DataFrame, Dataset, Row}
+import org.slf4j.LoggerFactory
 
 import scala.util.Try
 
-
-
-
-/**
- * Case class for Training & test sets
- *
- * @param train      training set is persisted at construction
- * @param summary    summary for building metadata
- */
-case class ModelData(train: Dataset[Row], summary: Option[SplitterSummary])
+case class PrevalidationVal(summaryOpt: Option[SplitterSummary], dataFrame: Option[DataFrame])
 
 /**
  * Abstract class that will carry on the creation of training set + test set
  */
 abstract class Splitter(val uid: String) extends SplitterParams {
+  @transient private[tuning] lazy val log = LoggerFactory.getLogger(this.getClass)
+
+  @transient private[op] var summary: Option[SplitterSummary] = None
 
   /**
    * Function to use to create the training set and test set.
@@ -70,14 +62,44 @@ abstract class Splitter(val uid: String) extends SplitterParams {
   }
 
   /**
-   * Function to use to prepare the dataset for modeling
+   * Function to use to prepare the dataset for modeling within the validation step
    * eg - do data balancing or dropping based on the labels
    *
    * @param data
    * @return Training set test set
    */
-  def prepare(data: Dataset[Row]): ModelData
+  def validationPrepare(data: Dataset[Row]): Dataset[Row] = {
+    checkPreconditions()
+    data
+  }
 
+
+  /**
+   * Function to set parameters before passing into the validation step
+   * eg - do data balancing or dropping based on the labels
+   *
+   * @param data
+   * @return Parameters set in examining data
+   */
+  def preValidationPrepare(data: Dataset[Row]): PrevalidationVal
+
+  protected def checkPreconditions(): Unit =
+    require(summary.nonEmpty, "Cannot call validationPrepare until preValidationPrepare has been called")
+
+  /**
+   * Add a splitter parameter to name the label column
+   *
+   * @param label
+   * @return
+   */
+  def withLabelColumnName(label: String): Splitter = {
+    if (!isSet(labelColumnName)) {
+      set(labelColumnName, label)
+    } else {
+      log.warn(s"$labelColumnName on an existing Splitter instance can be set only once")
+      this
+    }
+  }
 }
 
 trait SplitterParams extends Params {
@@ -106,6 +128,45 @@ trait SplitterParams extends Params {
 
   def setReserveTestFraction(value: Double): this.type = set(reserveTestFraction, value)
   def getReserveTestFraction: Double = $(reserveTestFraction)
+
+  /**
+   * Fraction to sample majority data
+   * Value should be in (0.0, 1.0]
+   *
+   * @group param
+   */
+  private[op] final val downSampleFraction = new DoubleParam(this, "downSampleFraction",
+    "fraction to sample majority data", ParamValidators.inRange(
+      lowerBound = 0.0, upperBound = 1.0, lowerInclusive = false, upperInclusive = true
+    )
+  )
+  setDefault(downSampleFraction, SplitterParamsDefault.DownSampleFractionDefault)
+
+  private[op] def setDownSampleFraction(value: Double): this.type = set(downSampleFraction, value)
+
+  private[op] def getDownSampleFraction: Double = $(downSampleFraction)
+
+  /**
+   * Maximum size of dataset want to train on.
+   * Value should be > 0.
+   * Default is 1000000.
+   *
+   * @group param
+   */
+  final val maxTrainingSample = new IntParam(this, "maxTrainingSample",
+    "maximum size of dataset want to train on", ParamValidators.inRange(
+      lowerBound = 0, upperBound = 1 << 30, lowerInclusive = false, upperInclusive = true
+    )
+  )
+  setDefault(maxTrainingSample, SplitterParamsDefault.MaxTrainingSampleDefault)
+
+  def setMaxTrainingSample(value: Int): this.type = set(maxTrainingSample, value)
+
+  def getMaxTrainingSample: Int = $(maxTrainingSample)
+
+  final val labelColumnName = new Param[String](this, "labelColumnName",
+    "label column name, column 0 if not specified")
+  private[op] def getLabelColumnName = $(labelColumnName)
 }
 
 object SplitterParamsDefault {
@@ -117,6 +178,7 @@ object SplitterParamsDefault {
   val MaxTrainingSampleDefault = 1E6.toInt
   val MaxLabelCategoriesDefault = 100
   val MinLabelFractionDefault = 0.0
+  val DownSampleFractionDefault = 1.0
 }
 
 trait SplitterSummary extends MetadataLike
@@ -125,20 +187,27 @@ private[op] object SplitterSummary {
   val ClassName: String = "className"
 
   def fromMetadata(metadata: Metadata): Try[SplitterSummary] = Try {
-    val map = metadata.wrapped.underlyingMap
-    map(ClassName) match {
-      case s if s == classOf[DataSplitterSummary].getCanonicalName => DataSplitterSummary()
-      case s if s == classOf[DataBalancerSummary].getCanonicalName => DataBalancerSummary(
-        positiveLabels = map(ModelSelectorNames.Positive).asInstanceOf[Long],
-        negativeLabels = map(ModelSelectorNames.Negative).asInstanceOf[Long],
-        desiredFraction = map(ModelSelectorNames.Desired).asInstanceOf[Double],
-        upSamplingFraction = map(ModelSelectorNames.UpSample).asInstanceOf[Double],
-        downSamplingFraction = map(ModelSelectorNames.DownSample).asInstanceOf[Double]
+    metadata.getString(ClassName) match {
+      case s if s == classOf[DataSplitterSummary].getName => DataSplitterSummary(
+        preSplitterDataCount = metadata.getLong(ModelSelectorNames.PreSplitterDataCount),
+        downSamplingFraction = metadata.getDouble(ModelSelectorNames.DownSample)
       )
-      case s if s == classOf[DataCutterSummary].getCanonicalName => DataCutterSummary(
-        labelsKept = map(ModelSelectorNames.LabelsKept).asInstanceOf[Array[Double]],
-        labelsDropped = map(ModelSelectorNames.LabelsDropped).asInstanceOf[Array[Double]]
+      case s if s == classOf[DataBalancerSummary].getName => DataBalancerSummary(
+        positiveLabels = metadata.getLong(ModelSelectorNames.Positive),
+        negativeLabels = metadata.getLong(ModelSelectorNames.Negative),
+        desiredFraction = metadata.getDouble(ModelSelectorNames.Desired),
+        upSamplingFraction = metadata.getDouble(ModelSelectorNames.UpSample),
+        downSamplingFraction = metadata.getDouble(ModelSelectorNames.DownSample)
       )
+      case s if s == classOf[DataCutterSummary].getName => DataCutterSummary(
+        preSplitterDataCount = metadata.getLong(ModelSelectorNames.PreSplitterDataCount),
+        downSamplingFraction = metadata.getDouble(ModelSelectorNames.DownSample),
+        labelsKept = metadata.getDoubleArray(ModelSelectorNames.LabelsKept),
+        labelsDropped = metadata.getDoubleArray(ModelSelectorNames.LabelsDropped),
+        labelsDroppedTotal = metadata.getLong(ModelSelectorNames.LabelsDroppedTotal)
+      )
+      case s =>
+        throw new RuntimeException(s"Unknown splitter summary class '$s'")
     }
   }
 }

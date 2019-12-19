@@ -34,6 +34,7 @@ import com.salesforce.op.OpWorkflow
 import com.salesforce.op.features.types._
 import com.salesforce.op.test.{PassengerSparkFixtureTest, TestFeatureBuilder}
 import com.salesforce.op.testkit.RandomText
+import com.salesforce.op.utils.spark.OpVectorMetadata
 import com.salesforce.op.utils.spark.RichDataset._
 import com.salesforce.op.utils.spark.RichStructType._
 import com.salesforce.op.utils.text.TextUtils
@@ -43,7 +44,7 @@ import org.scalatest.junit.JUnitRunner
 
 
 @RunWith(classOf[JUnitRunner])
-class TextTransmogrifyTest extends FlatSpec with PassengerSparkFixtureTest {
+class TextTransmogrifyTest extends FlatSpec with PassengerSparkFixtureTest with AttributeAsserts {
 
   val cityData: Seq[City] = RandomText.cities.take(10).toList
   val countryData: Seq[Country] = RandomText.countries.take(10).toList
@@ -55,7 +56,7 @@ class TextTransmogrifyTest extends FlatSpec with PassengerSparkFixtureTest {
 
   val data: Seq[(City, Country, PostalCode, Text, TextArea)] =
     cityData.zip(countryData).zip(postalData).zip(textData).zip(textAreaData)
-      .map{ case ((((ci, co), p), t), ta) => (ci, co, p, t, ta) }
+      .map { case ((((ci, co), p), t), ta) => (ci, co, p, t, ta) }
 
   val (ds, city, country, postal, text, textarea) = TestFeatureBuilder("city", "country", "postal", "text",
     "textarea", data)
@@ -96,7 +97,9 @@ class TextTransmogrifyTest extends FlatSpec with PassengerSparkFixtureTest {
     val feature = Seq(largeText, largeTextarea).transmogrify()
     val vectorized = new OpWorkflow().setResultFeatures(feature).transform(largeDS)
     val vectCollect = vectorized.collect(feature)
-
+    val field = vectorized.schema(feature.name)
+    val array = Array.fill(vectCollect.head.value.size / 2 - 1)(false) :+ true
+    assertNominal(field, array ++ array, vectCollect)
     for {vector <- vectCollect} {
       vector.v.size shouldBe TransmogrifierDefaults.DefaultNumOfFeatures * 2 + 2
     }
@@ -109,7 +112,10 @@ class TextTransmogrifyTest extends FlatSpec with PassengerSparkFixtureTest {
     val feature2 = phone.vectorize("US")
     val vectorized = new OpWorkflow().setResultFeatures(feature, feature2).transform(ds)
     val vectCollect = vectorized.collect(feature, feature2)
-
+    val field = vectorized.schema(feature.name)
+    assertNominal(field, Array.fill(vectCollect.head._1.value.size)(true), vectCollect.map(_._1))
+    val field2 = vectorized.schema(feature2.name)
+    assertNominal(field2, Array.fill(vectCollect.head._2.value.size)(true), vectCollect.map(_._2))
     for {(vector1, vector2) <- vectCollect} {
       vector1.v.size shouldBe 2
       vector1.v.toArray should contain theSameElementsAs vector2.v.toArray
@@ -122,8 +128,26 @@ class TextTransmogrifyTest extends FlatSpec with PassengerSparkFixtureTest {
     val feature = Seq(text).transmogrify()
     val vectorized = new OpWorkflow().setResultFeatures(feature).transform(ds)
     val vectCollect = vectorized.collect(feature)
-
+    val field = vectorized.schema(feature.name)
+    assertNominal(field, Array.fill(vectCollect.head.value.size)(true), vectCollect)
     vectCollect.forall(_.value.size == TransmogrifierDefaults.DefaultNumOfFeatures + 1)
+  }
+
+  "OpTextPivotVectorizer" should "drop high cardinality feature" in {
+    val data = Seq("A", "B", "A", "C", "C", "A")
+    val (df, f1) = TestFeatureBuilder(data.map(_.toText))
+
+    val textPivotVectorizer = new OpTextPivotVectorizer[Text]().setMaxPctCardinality(0.2)
+
+    val res = textPivotVectorizer.setInput(f1).getOutput()
+    val transformed = new OpWorkflow().setResultFeatures(res).transform(df)
+    val field = transformed.schema(res.name)
+    val result = transformed.collect(res)
+    val expect = OpVectorMetadata("", field.metadata).columns
+      .map(c => !(c.isOtherIndicator && c.parentFeatureType.head == FeatureType.typeName[Text]))
+    assertNominal(field, expect, result)
+
+    result should contain theSameElementsAs Array.fill(6)(OPVector.empty)
   }
 
 }

@@ -3,16 +3,19 @@ buildscript {
         mavenCentral()
         maven { url "https://plugins.gradle.org/m2/" }
     }
-    dependencies {
-        classpath 'com.github.jengelman.gradle.plugins:shadow:2.0.2'
-        classpath 'com.commercehub.gradle.plugin:gradle-avro-plugin:0.8.0'
-      //classpath 'org.github.ngbinh.scalastyle:gradle-scalastyle-plugin_2.11:1.0.1'
-    }
+    //dependencies {
+    //  classpath 'org.github.ngbinh.scalastyle:gradle-scalastyle-plugin_2.11:1.0.1'
+    //}
+}
+
+plugins {
+    id 'com.commercehub.gradle.plugin.avro' version '0.8.0'
+    id 'com.github.johnrengelman.shadow' version '5.0.0'
 }
 
 repositories {
+    jcenter()
     mavenCentral()
-    maven { url 'https://dl.bintray.com/salesforce/maven' }
 }
 
 apply plugin: 'application'
@@ -26,7 +29,7 @@ apply from: 'spark.gradle'
 sourceCompatibility = 1.8
 targetCompatibility = 1.8
 
-// The main class for the application plugin and is currently unused. Setting a dummy one.
+// The main class for the application plugin
 mainClassName = "com.salesforce.app.Simple" /* << MAIN_CLASS */
 
 ext {
@@ -37,8 +40,6 @@ ext {
     scalaTestVersion = '$scalaTestVersion'
     transmogrifaiVersion = '$transmogrifaiVersion'
     collectionsVersion = '$collectionsVersion'
-
-    mainClassName = 'com.salesforce.app.Simple' /* << MAIN_CLASS */
 }
 
 configurations {
@@ -108,7 +109,7 @@ compileTestScala { scalaCompileOptions.additionalParameters = ["-Yrangepos"] }
 
 jar {
     manifest.attributes "Main-Class": "\$mainClassName"
-    baseName="\${rootProject.name}"
+    baseName="\$rootProject.name"
 }
 
 shadowJar {
@@ -142,7 +143,7 @@ task repl(type: JavaExec) {
 }
 
 wrapper {
-    gradleVersion = '4.10'
+    gradleVersion = '5.2'
     distributionType = Wrapper.DistributionType.BIN
-    distributionSha256Sum = '248cfd92104ce12c5431ddb8309cf713fe58de8e330c63176543320022f59f18'
+    distributionSha256Sum = 'ff322863250159595e93b5a4d17a6f0d21c59a1a0497c1e1cf1d53826485503f'
 }

@@ -40,7 +40,7 @@ import org.apache.spark.ml.feature.{StringIndexer, StringIndexerModel}
 import scala.reflect.runtime.universe.TypeTag
 
 /**
- * OP wrapper for [[org.apache.spark.ml.feature.StringIndexer]]
+ * Wrapper for [[org.apache.spark.ml.feature.StringIndexer]]
  *
  * NOTE THAT THIS CLASS EITHER FILTERS OUT OR THROWS AN ERROR IF PREVIOUSLY UNSEEN VALUES APPEAR
  *
@@ -63,7 +63,7 @@ class OpStringIndexer[T <: Text]
    * @return this stage
    */
   def setHandleInvalid(value: StringIndexerHandleInvalid): this.type = {
-    assert(Seq(Inv.Skip, Inv.Error, Inv.Keep).contains(value),
+    require(Seq(Inv.Skip, Inv.Error, Inv.Keep).contains(value),
       "OpStringIndexer only supports Skip, Error, and Keep for handle invalid")
     getSparkMlStage().get.setHandleInvalid(value.entryName.toLowerCase)
     this

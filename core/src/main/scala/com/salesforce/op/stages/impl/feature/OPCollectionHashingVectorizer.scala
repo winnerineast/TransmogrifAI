@@ -36,6 +36,7 @@ import com.salesforce.op.features.types._
 import com.salesforce.op.stages.OpPipelineStageBase
 import com.salesforce.op.stages.base.sequence.SequenceTransformer
 import com.salesforce.op.utils.spark.{OpVectorColumnMetadata, OpVectorMetadata}
+import com.salesforce.op.utils.spark.RichVector._
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
 import org.apache.spark.ml.param._
 import org.apache.spark.mllib.feature.HashingTF
@@ -265,7 +266,7 @@ private[op] trait HashingFun {
           fNameHashesWithInputs.map { case (featureNameHash, el) =>
             hasher.transform(prepare[T](el, params.hashWithIndex, params.prependFeatureName, featureNameHash)).asML
           }
-        VectorsCombiner.combine(hashedVecs).toOPVector
+        combine(hashedVecs).toOPVector
       }
     }
   }
@@ -313,8 +314,11 @@ private[op] trait MapHashingFun extends HashingFun {
 
   protected def makeVectorColumnMetadata
   (
-    features: Array[TransientFeature], params: HashingFunctionParams,
-    allKeys: Seq[Seq[String]], shouldTrackNulls: Boolean
+    features: Array[TransientFeature],
+    params: HashingFunctionParams,
+    allKeys: Seq[Seq[String]],
+    shouldTrackNulls: Boolean,
+    shouldTrackLen: Boolean
   ): Array[OpVectorColumnMetadata] = {
     val numHashes = params.numFeatures
     val numFeatures = allKeys.map(_.length).sum
@@ -335,6 +339,7 @@ private[op] trait MapHashingFun extends HashingFun {
           i <- 0 until numHashes
         } yield f.toColumnMetaData().copy(grouping = Option(key))
       }
+
     val nullColumns = if (shouldTrackNulls) {
       for {
         (keys, f) <- allKeys.toArray.zip(features)
@@ -342,7 +347,14 @@ private[op] trait MapHashingFun extends HashingFun {
       } yield f.toColumnMetaData(isNull = true).copy(grouping = Option(key))
     } else Array.empty[OpVectorColumnMetadata]
 
-    hashColumns ++ nullColumns
+    val lenColumns = if (shouldTrackLen) {
+      for {
+        (keys, f) <- allKeys.toArray.zip(features)
+        key <- keys
+      } yield f.toColumnMetaData(descriptorValue = OpVectorColumnMetadata.TextLenString).copy(grouping = Option(key))
+    } else Array.empty[OpVectorColumnMetadata]
+
+    hashColumns ++ lenColumns ++ nullColumns
   }
 
   protected def hash
@@ -379,7 +391,7 @@ private[op] trait MapHashingFun extends HashingFun {
               prepare[TextList](el, params.hashWithIndex, params.prependFeatureName, featureNameHash)
             ).asML
           })
-        VectorsCombiner.combine(hashedVecs.flatten).toOPVector
+        combine(hashedVecs.flatten).toOPVector
       }
     }
   }

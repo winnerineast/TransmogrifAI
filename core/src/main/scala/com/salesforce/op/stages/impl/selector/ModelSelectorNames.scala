@@ -45,6 +45,7 @@ case object ModelSelectorNames {
   val HoldOutEval = "testSetEvaluationResults"
   val ResampleValues = "resamplingValues"
   val CuttValues = "cuttValues"
+  val PreSplitterDataCount = "preSplitterDataCount"
   val BestModelUid = "bestModelUID"
   val BestModelName = "bestModelName"
   val Positive = "positiveLabels"
@@ -55,6 +56,7 @@ case object ModelSelectorNames {
   val idColName = "rowId"
   val LabelsKept = "labelsKept"
   val LabelsDropped = "labelsDropped"
+  val LabelsDroppedTotal = "labelsDroppedTotal"
 
   type ModelType = Model[_ <: Model[_]] with OpTransformer2[RealNN, OPVector, Prediction]
   type EstimatorType = Estimator[_ <: Model[_]] with OpPipelineStage2[RealNN, OPVector, Prediction]

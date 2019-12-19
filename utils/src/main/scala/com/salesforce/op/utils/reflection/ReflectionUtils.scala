@@ -35,7 +35,6 @@ import scala.reflect.runtime.universe._
 import scala.reflect.runtime.{universe => runtimeUniverse}
 import scala.util.{Failure, Success}
 
-
 /**
  * Various Reflection helpers
  */
@@ -57,7 +56,7 @@ object ReflectionUtils {
   }
 
   /**
-   * Create a new instance of type T given a ctor argse getter function
+   * Create a new instance of type T given a ctor args getter function
    *
    * @param klazz       instance class
    * @param ctorArgs    ctor args getter function
@@ -76,6 +75,38 @@ object ReflectionUtils {
     val (ctor, args) = bestCtor(klazz, classType, classMirror, ctorArgs)
     // apply the constructor on the extracted args
     ctor.apply(args.map(_._2): _*).asInstanceOf[T]
+  }
+
+  /**
+   * Create a new of type T given it's class name
+   *
+   * @param className instance class
+   * @tparam T type T
+   * @return new instance of T
+   */
+  def newInstance[T](className: String): T = newInstance[T](className, defaultClassLoader)
+
+  /**
+   * Create a new of type T given it's class name
+   *
+   * @param className   instance class
+   * @param classLoader class loader to use
+   * @tparam T type T
+   * @return new instance of T
+   */
+  def newInstance[T](className: String, classLoader: ClassLoader): T = try {
+    val klazz = ReflectionUtils.classForName(className, classLoader)
+    // Try to create an instance only if it has a single no-args ctor or fall back to object
+    val res = klazz.getConstructors.find(_.getParameterCount == 0) match {
+      case Some(c) => c.newInstance()
+      case _ => klazz.getField("MODULE$").get(klazz)
+    }
+    res.asInstanceOf[T]
+  } catch {
+    case e: Exception => throw new RuntimeException(
+      s"Failed to create an instance of class '$className'. " +
+        "Class has to either have a no-args ctor or be an object.", e
+    )
   }
 
   /**
@@ -136,43 +167,57 @@ object ReflectionUtils {
 
   /**
    * Find setter methods for the provided method name
-   * @param instance     class to find method for
-   * @param setterName   name of method to find
-   * @param classLoader  class loader to use
-   * @tparam T  type of instance to copy
-   * @return    reflected method to set type
+   * @param instance    class to find method for
+   * @param setterName  name of method to find
+   * @param args        argument values
+   * @param argsCount   optional number of arguments to match
+   * @param classLoader class loader to use
+   * @tparam T type of instance to copy
+   * @return reflected method to set type
    */
   def reflectSetterMethod[T: ClassTag](
     instance: T,
     setterName: String,
-    inputs: Seq[Any],
+    args: Seq[Any],
+    argsCount: Option[Int] = None,
     classLoader: ClassLoader = defaultClassLoader
   ): Any = {
-    reflectMethod(instance, s"set$setterName", classLoader).apply(inputs: _*)
+    reflectMethod(instance, s"set$setterName", argsCount, classLoader).apply(args: _*)
   }
 
   /**
    * Find setter methods for the provided method name
-   * @param instance     class to find method for
-   * @param methodName   name of method to find
-   * @param classLoader  class loader to use
-   * @tparam T  type of instance to copy
-   * @return    reflected method to set type
+   * @param instance    class to find method for
+   * @param methodName  name of method to find
+   * @param argsCount   optional number of arguments to match
+   * @param classLoader class loader to use
+   * @tparam T type of instance to copy
+   * @return reflected method to set type
    */
   def reflectMethod[T: ClassTag](
     instance: T,
     methodName: String,
+    argsCount: Option[Int] = None,
     classLoader: ClassLoader = defaultClassLoader
   ): MethodMirror = {
     val klazz = instance.getClass
     val (runtimeMirror, classMirror) = mirrors(klazz, classLoader)
     val classType = runtimeMirror.classSymbol(klazz).toType
     val tMembers = classType.members
-    val methods = tMembers.collect { case m: MethodSymbol if m.isMethod &&
-      termNameStr(m.name).compareToIgnoreCase(methodName) == 0 => m
+    val methodsWithParams = tMembers.collect { case m: MethodSymbol => m -> m.paramLists.flatten }
+    val methods = methodsWithParams.collect {
+      case (m: MethodSymbol, params) if m.isMethod &&
+        termNameStr(m.name).compareToIgnoreCase(methodName) == 0 &&
+        (argsCount.isEmpty || argsCount.contains(params.length)) => m -> params
+    }.toList.sortBy(-_._2.length).map(_._1)
+
+    methods match {
+      case method :: _ =>
+        val instanceMirror = runtimeMirror.reflect(instance)
+        instanceMirror.reflectMethod(method)
+      case Nil =>
+        throw new RuntimeException(s"Method with name '$methodName' was not found on instance of type: $klazz")
     }
-    val instanceMirror = runtimeMirror.reflect(instance)
-    instanceMirror.reflectMethod(methods.head)
   }
 
   /**
@@ -184,7 +229,6 @@ object ReflectionUtils {
    * @return class object
    */
   def classForName(name: String, classLoader: ClassLoader = defaultClassLoader): Class[_] = classLoader.loadClass(name)
-
 
   /**
    * Fully dealiased type name for [[Type]].
@@ -208,17 +252,31 @@ object ReflectionUtils {
   /**
    * Create a TypeTag for Type
    *
-   * @param rtm runtime mirror
    * @param tpe type
+   * @param rtm runtime mirror
    * @tparam T type T
    * @return TypeTag[T]
    */
-  def typeTagForType[T](rtm: Mirror = runtimeMirror(), tpe: Type): TypeTag[T] = {
+  def typeTagForType[T](tpe: Type, rtm: Mirror = runtimeMirror()): TypeTag[T] = {
     TypeTag(rtm, new api.TypeCreator {
       def apply[U <: api.Universe with Singleton](m: api.Mirror[U]): U#Type =
         if (m eq rtm) tpe.asInstanceOf[U#Type]
         else throw new IllegalArgumentException(s"Type tag defined in $rtm cannot be migrated to other mirrors.")
     })
+  }
+
+  /**
+   * Returns a Type Tag by Type name
+   *
+   * @param typeName type name
+   * @param rtm      runtime mirror
+   * @tparam T type T
+   * @return TypeTag[T]
+   */
+  def typeTagForTypeName[T](typeName: String, rtm: Mirror = runtimeMirror()): TypeTag[T] = {
+    val clazz = classForName(typeName)
+    val typee = rtm.classSymbol(clazz).toType
+    typeTagForType[T](typee, rtm)
   }
 
   /**
@@ -300,9 +358,7 @@ object ReflectionUtils {
     ctorCandidates.partition(_.isSuccess) match {
       case (Success(ctor) :: _, _) => ctor
       case (_, Failure(error) :: _) => throw error
-      case _ => throw new RuntimeException(
-        s"No constructors were found for type ${klazz.getCanonicalName}"
-      )
+      case _ => throw new RuntimeException(s"No constructors were found for type ${klazz.getName}")
     }
   }
 
@@ -331,7 +387,7 @@ object ReflectionUtils {
     paramValues.collectFirst { case (paramName, Failure(error)) =>
       throw new RuntimeException(
         s"Failed to extract value for param '$paramName' " +
-          s"for an instance of type '${klazz.getCanonicalName}' due to: ${error.getMessage}",
+          s"for an instance of type '${klazz.getName}' due to: ${error.getMessage}",
         error
       )
     }

@@ -5,57 +5,83 @@
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
  *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
+ * * Redistributions of source code must retain the above copyright notice, this
+ *   list of conditions and the following disclaimer.
  *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
+ * * Redistributions in binary form must reproduce the above copyright notice,
+ *   this list of conditions and the following disclaimer in the documentation
+ *   and/or other materials provided with the distribution.
  *
- * 3. Neither the name of Salesforce.com nor the names of its contributors may
- * be used to endorse or promote products derived from this software without
- * specific prior written permission.
+ * * Neither the name of the copyright holder nor the names of its
+ *   contributors may be used to endorse or promote products derived from
+ *   this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 package com.salesforce.hw.titanic
 
+import java.io.Serializable
+
+import com.salesforce.hw.titanic.TitanicFeatures._
 import com.salesforce.op.features.FeatureBuilder
 import com.salesforce.op.features.types._
 
 trait TitanicFeatures extends Serializable {
+  val survived = FeatureBuilder.RealNN[Passenger].extract(new Survived).asResponse
+  val pClass = FeatureBuilder.PickList[Passenger].extract(new PClass).asPredictor
+  val name = FeatureBuilder.Text[Passenger].extract(new Name).asPredictor
+  val sex = FeatureBuilder.PickList[Passenger].extract(new Sex).asPredictor
+  val age = FeatureBuilder.Real[Passenger].extract(new Age).asPredictor
+  val sibSp = FeatureBuilder.PickList[Passenger].extract(new SibSp).asPredictor
+  val parch = FeatureBuilder.PickList[Passenger].extract(new Parch).asPredictor
+  val ticket = FeatureBuilder.PickList[Passenger].extract(new Ticket).asPredictor
+  val fare = FeatureBuilder.Real[Passenger].extract(new Fare).asPredictor
+  val cabin = FeatureBuilder.PickList[Passenger].extract(new Cabin).asPredictor
+  val embarked = FeatureBuilder.PickList[Passenger].extract(new Embarked).asPredictor
+}
 
-  val survived = FeatureBuilder.RealNN[Passenger].extract(_.getSurvived.toDouble.toRealNN).asResponse
+object TitanicFeatures {
+  abstract class TitanicFeatureFunc[T] extends Function[Passenger, T] with Serializable
 
-  val pClass = FeatureBuilder.PickList[Passenger].extract(d => Option(d.getPclass).map(_.toString).toPickList).asPredictor // scalastyle:off
+  class RealExtract[T <: Real](f: Passenger => Option[Double], f1: Option[Double] => T) extends TitanicFeatureFunc[T] {
+    override def apply(v1: Passenger): T = f1(f(v1))
+  }
 
-  val name = FeatureBuilder.Text[Passenger].extract(d => Option(d.getName).toText).asPredictor
+  class PickListExtract(f: Passenger => Option[_]) extends TitanicFeatureFunc[PickList] {
+    override def apply(v1: Passenger): PickList = f(v1).map(_.toString).toPickList
+  }
 
-  val sex = FeatureBuilder.PickList[Passenger].extract(d => Option(d.getSex).toPickList).asPredictor
+  class Survived extends RealExtract(p => Option(p.getSurvived).map(_.toDouble), _.get.toRealNN)
 
-  val age = FeatureBuilder.Real[Passenger].extract(d => Option(Double.unbox(d.getAge)).toReal).asPredictor
+  class PClass extends PickListExtract(p => Option(p.getPclass))
 
-  val sibSp = FeatureBuilder.PickList[Passenger].extract(d => Option(d.getSibSp).map(_.toString).toPickList).asPredictor
+  class Sex extends PickListExtract(p => Option(p.getSex))
 
-  val parch = FeatureBuilder.PickList[Passenger].extract(d => Option(d.getParch).map(_.toString).toPickList).asPredictor
+  class SibSp extends PickListExtract(p => Option(p.getSibSp))
 
-  val ticket = FeatureBuilder.PickList[Passenger].extract(d => Option(d.getTicket).toPickList).asPredictor
+  class Parch extends PickListExtract(p => Option(p.getParch))
 
-  val fare = FeatureBuilder.Real[Passenger].extract(d => Option(Double.unbox(d.getFare)).toReal).asPredictor
+  class Ticket extends PickListExtract(p => Option(p.getTicket))
 
-  val cabin = FeatureBuilder.PickList[Passenger].extract(d => Option(d.getCabin).toPickList).asPredictor
+  class Embarked extends PickListExtract(p => Option(p.getEmbarked))
 
-  val embarked = FeatureBuilder.PickList[Passenger].extract(d => Option(d.getEmbarked).toPickList).asPredictor
+  class Cabin extends PickListExtract(p => Option(p.getCabin))
 
+  class Name extends TitanicFeatureFunc[Text] with Serializable {
+    override def apply(v1: Passenger): Text = Option(v1.getName).toText
+  }
+
+  class Age extends RealExtract(p => Option(Double.unbox(p.getAge)), _.toReal)
+
+  class Fare extends RealExtract(p => Option(Double.unbox(p.getFare)), _.toReal)
 }

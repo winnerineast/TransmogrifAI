@@ -27,6 +27,7 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.salesforce.op.stages.impl.feature
 
 import com.salesforce.op.features.types._
@@ -38,7 +39,7 @@ import org.scalatest.junit.JUnitRunner
 import com.salesforce.op.utils.spark.RichDataset._
 
 @RunWith(classOf[JUnitRunner])
-class OpStringIndexerTest extends FlatSpec with TestSparkContext{
+class OpStringIndexerTest extends FlatSpec with TestSparkContext {
 
   val txtData = Seq("a", "b", "c", "a", "a", "c").map(_.toText)
   val (ds, txtF) = TestFeatureBuilder(txtData)
@@ -57,7 +58,7 @@ class OpStringIndexerTest extends FlatSpec with TestSparkContext{
 
   it should "throw an error if you try to set noFilter as the indexer" in {
     val indexer = new OpStringIndexer[Text]()
-    intercept[AssertionError](indexer.setHandleInvalid(StringIndexerHandleInvalid.NoFilter))
+    intercept[IllegalArgumentException](indexer.setHandleInvalid(StringIndexerHandleInvalid.NoFilter))
   }
 
   it should "correctly index a text column" in {
@@ -67,7 +68,7 @@ class OpStringIndexerTest extends FlatSpec with TestSparkContext{
     indices shouldBe expected
   }
 
-  it should "correctly deinxed a numeric column" in {
+  it should "correctly deindex a numeric column" in {
     val indexedStage = new OpStringIndexer[Text]().setInput(txtF)
     val indexed = indexedStage.getOutput()
     val indices = indexedStage.fit(ds).transform(ds)
